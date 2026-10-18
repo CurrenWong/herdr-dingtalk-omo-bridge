@@ -141,6 +141,10 @@ obtains them for you.
 
 ### 2. Install the plugin
 
+Two channels, same result. Pick whichever fits your toolchain.
+
+**A — from GitHub** (needs `git`):
+
 ```bash
 herdr plugin install CurrenWong/herdr-dingtalk-omo-bridge
 ```
@@ -149,7 +153,38 @@ Herdr shows a preview of the source and the commands it will run. Confirm, and
 it clones, runs `npm ci --omit=dev`, and registers the plugin. Use `--yes` to
 skip the preview, `--ref <ref>` to pin a revision.
 
-Confirm it landed:
+**B — from npm** (needs `npx`, no `git`):
+
+```bash
+npx herdr-dingtalk-omo-bridge@latest install --dry-run   # see the plan first
+npx herdr-dingtalk-omo-bridge@latest install
+```
+
+or with bun:
+
+```bash
+bunx herdr-dingtalk-omo-bridge@latest install
+```
+
+This unpacks the package into a versioned directory under your user data area
+(`%LOCALAPPDATA%\herdr\plugin-packages\dingtalk-omo-bridge\<version>` on
+Windows, `~/.local/share/...` on Linux, `~/Library/Application Support/...` on
+macOS), installs its dependencies, and calls `herdr plugin link` on the result.
+
+Useful flags and commands:
+
+| | |
+|---|---|
+| `--dry-run` | Print the plan as JSON, change nothing |
+| `--no-link` | Stop after the files are in place, so you can inspect before registering |
+| `--dir PATH` | Install somewhere other than the default |
+| `status` | What is installed, and where Herdr thinks it is linked |
+| `uninstall` | Unregister and delete the installed files |
+
+It refuses to write into a directory it did not create, so pointing it at an
+existing git checkout will error instead of overwriting your work.
+
+Either way, confirm it landed:
 
 ```bash
 herdr plugin list        # expect: dingtalk-omo-bridge (DingTalk ↔ OmO Bridge) enabled

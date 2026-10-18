@@ -11,6 +11,28 @@
     "plugin"
   ],
   "license": "MIT",
+  "bin": {
+    "herdr-dingtalk-omo-bridge": "bin/herdr-dingtalk-omo-bridge.mjs"
+  },
+  "files": [
+    "bin/",
+    "installer.mjs",
+    "herdr-plugin.toml",
+    "auth.mjs",
+    "check-reply.mjs",
+    "dingtalk-bridge.mjs",
+    "herdr-paths.mjs",
+    "inbound.mjs",
+    "probe.mjs",
+    "probe-emotion.mjs",
+    "startup.mjs",
+    "supervise.mjs",
+    "npm-shrinkwrap.json",
+    "docs/herdr-notes.md"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
   "repository": {
     "type": "git",
     "url": "https://github.com/CurrenWong/herdr-dingtalk-omo-bridge.git"
@@ -24,7 +46,7 @@
     "node": ">=20"
   },
   "scripts": {
-    "check": "node --check auth.mjs && node --check check-reply.mjs && node --check dingtalk-bridge.mjs && node --check herdr-paths.mjs && node --check inbound.mjs && node --check probe.mjs && node --check probe-emotion.mjs && node --check startup.mjs && node --check supervise.mjs",
+    "check": "node --check auth.mjs && node --check check-reply.mjs && node --check dingtalk-bridge.mjs && node --check herdr-paths.mjs && node --check inbound.mjs && node --check installer.mjs && node --check bin/herdr-dingtalk-omo-bridge.mjs && node --check probe.mjs && node --check probe-emotion.mjs && node --check startup.mjs && node --check supervise.mjs",
     "check-paths": "node .github/scripts/check-paths.mjs",
     "check-manifest": "node .github/scripts/check-manifest.mjs",
     "scan-secrets": "node .github/scripts/scan-secrets.mjs .",

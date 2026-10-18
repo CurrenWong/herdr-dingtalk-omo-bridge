@@ -11,6 +11,9 @@
       "dependencies": {
         "dingtalk-stream": "^2.1.6-beta.1"
       },
+      "bin": {
+        "herdr-dingtalk-omo-bridge": "bin/herdr-dingtalk-omo-bridge.mjs"
+      },
       "engines": {
         "node": ">=20"
       }

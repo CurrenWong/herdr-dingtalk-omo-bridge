@@ -10,7 +10,7 @@
 // one counts, and getting that wrong is how this check failed the first time.
 //
 // Usage: node .github/scripts/check-manifest.mjs
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DEFAULT_PLUGIN_ID } from "../../herdr-paths.mjs";
@@ -68,25 +68,38 @@ for (const r of required) {
 }
 console.log(`pane entrypoints:   ${entrypoints.join(", ") || "(none)"}`);
 
-// package-lock.json must agree with package.json. The install runs
-// `npm ci --omit=dev`, and a lockfile left behind by a rename makes it unclear
-// whether that will succeed at install time — which is not a thing you want to
-// discover on someone else's machine.
+// The lockfile must agree with package.json. The install runs `npm ci
+// --omit=dev`, and a lockfile left behind by a rename makes it unclear whether
+// that will succeed at install time — which is not a thing you want to discover
+// on someone else's machine.
+//
+// It is named npm-shrinkwrap.json rather than package-lock.json because npm
+// refuses to publish a root package-lock, and the `npx ... install` channel
+// needs the lock to travel with the package.
+const LOCKFILE = existsSync(join(root, "npm-shrinkwrap.json"))
+  ? "npm-shrinkwrap.json"
+  : "package-lock.json";
 const pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
-const lock = JSON.parse(readFileSync(join(root, "package-lock.json"), "utf8"));
+const lock = JSON.parse(readFileSync(join(root, LOCKFILE), "utf8"));
 const lockRoot = lock.packages?.[""] ?? {};
 
+if (LOCKFILE !== "npm-shrinkwrap.json") {
+  problems.push(
+    "npm-shrinkwrap.json is missing — npm cannot publish package-lock.json, so the npx install would have no lockfile",
+  );
+}
+
 console.log(`package.json:       ${pkg.name}@${pkg.version}`);
-console.log(`package-lock.json:  ${lock.name}@${lock.version}`);
+console.log(`${LOCKFILE}:  ${lock.name}@${lock.version}`);
 
 if (lock.name !== pkg.name) {
-  problems.push(`package-lock.json name "${lock.name}" != package.json name "${pkg.name}" — run: npm install --package-lock-only`);
+  problems.push(`${LOCKFILE} name "${lock.name}" != package.json name "${pkg.name}" — run: npm install --package-lock-only`);
 }
 if (lock.version !== pkg.version) {
-  problems.push(`package-lock.json version "${lock.version}" != package.json version "${pkg.version}" — run: npm install --package-lock-only`);
+  problems.push(`${LOCKFILE} version "${lock.version}" != package.json version "${pkg.version}" — run: npm install --package-lock-only`);
 }
 if (lockRoot.name && lockRoot.name !== pkg.name) {
-  problems.push(`package-lock.json root package name "${lockRoot.name}" is stale`);
+  problems.push(`${LOCKFILE} root package name "${lockRoot.name}" is stale`);
 }
 
 // The manifest's build step must match what CI verifies, or CI is testing a

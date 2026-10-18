@@ -1,0 +1,61 @@
+name: Publish to npm
+
+# Manual only. Publishing is a deliberate act, so this never fires on push.
+# Requires a trusted publisher configured on npmjs.com for this repository
+# (Settings → Trusted Publishing), which avoids storing an npm token at all.
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Pack and verify without publishing"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+  id-token: write # provenance
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Install
+        run: npm ci
+
+      - name: Gates (same as CI)
+        run: |
+          npm run check
+          npm run check-paths
+          npm run check-manifest
+          npm run scan-secrets
+
+      - name: Verify the tarball actually contains the plugin
+        # The lockfile is easy to lose here: npm refuses to publish a root
+        # package-lock.json, so it lives as npm-shrinkwrap.json and has to be
+        # listed in `files` explicitly. Without it the npx installer cannot run
+        # npm ci, so check rather than assume.
+        run: |
+          npm pack --dry-run 2>&1 | tee /tmp/pack.txt
+          for f in npm-shrinkwrap.json herdr-plugin.toml installer.mjs bin/herdr-dingtalk-omo-bridge.mjs; do
+            grep -q "$f" /tmp/pack.txt || { echo "::error::$f missing from the tarball"; exit 1; }
+          done
+
+      - name: Check the version is not already published
+        run: |
+          version=$(node -p "require('./package.json').version")
+          published=$(npm view "herdr-dingtalk-omo-bridge@$version" version 2>/dev/null || true)
+          if [ -n "$published" ]; then
+            echo "::error::version $version is already on npm — bump package.json first"
+            exit 1
+          fi
+
+      - name: Publish
+        if: ${{ !inputs.dry_run }}
+        run: npm publish --provenance --access public
