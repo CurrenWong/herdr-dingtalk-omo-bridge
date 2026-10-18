@@ -70,9 +70,6 @@ const TEXT = {
     choiceExpired: "选择已过期，请重发刚才的消息。",
     renameOk: ({ pane, label, name }) => `✅ 已把 ${pane}${label ? `（${label}）` : ""} 改名为 ${name}。请重发刚才的消息。`,
     renameFailed: (err) => `❌ 改名失败：${err}`,
-    ambiguous: (names, name, paneHint) =>
-      `找到 ${names.length} 个 agent（${names.join(", ")}），没有叫「${name}」的，无法确定投给谁。` +
-      `请运行 herdr agent rename ${paneHint} ${name}，或把 LAB_TARGET_AGENT 设成其中一个名字。`,
     busy: "上一条还在处理中，稍等。",
     handleFailed: (msg) => `桥接出错：${msg}`,
     unsupported: (type) => `只支持文本消息，收到的是 ${type}。图片和文件没法交给 OmO。`,
@@ -97,9 +94,6 @@ const TEXT = {
     choiceExpired: "That choice expired — please resend your message.",
     renameOk: ({ pane, label, name }) => `✅ Renamed ${pane}${label ? ` (${label})` : ""} to ${name}. Resend your message.`,
     renameFailed: (err) => `❌ Rename failed: ${err}`,
-    ambiguous: (names, name, paneHint) =>
-      `Found ${names.length} agents (${names.join(", ")}) and none is named "${name}", so there is no safe guess. ` +
-      `Run herdr agent rename ${paneHint} ${name}, or set LAB_TARGET_AGENT to one of those names.`,
     busy: "Still working on the previous message.",
     handleFailed: (msg) => `Bridge error: ${msg}`,
     unsupported: (type) => `Text messages only — this one was "${type}". Images and files cannot be handed to OmO.`,
@@ -110,7 +104,16 @@ const TEXT = {
     progress: (text) => `⏳ ${text}`,
   },
 };
-const t = (key, ...args) => TEXT[LANG][key](...args);
+// Look a message up by key. Values are either a constant string or a function
+// taking the interpolated parts — so call it when it is callable, and return it
+// otherwise. Blowing up on the constant ones ("TEXT[LANG][key] is not a
+// function") reached users as a bridge error instead of a message.
+const t = (key, ...args) => {
+  const value = TEXT[LANG][key];
+  if (typeof value === "function") return value(...args);
+  if (value === undefined) throw new Error(`missing message: ${key} (lang=${LANG})`);
+  return value;
+};
 
 mkdirSync(STATE_DIR, { recursive: true });
 const logFile = join(STATE_DIR, "dingtalk-bridge.log");
