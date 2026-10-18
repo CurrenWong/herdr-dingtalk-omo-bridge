@@ -24,7 +24,7 @@ import { saveAttachment } from "./attachments.mjs";
 import { ACTIONS, classifyInbound } from "./inbound.mjs";
 import { assistantMessagesSince, lastAssistantText } from "./session-log.mjs";
 import { CHOICE_TTL_MS, agentChoices, parseChoice, selectAgent } from "./agent-target.mjs";
-import { SLASH, classifySlash, pickNewLines } from "./slash.mjs";
+import { SLASH, classifySlash, parsePickerRows, pickNewLines } from "./slash.mjs";
 import { DEFAULT_PLUGIN_ID, defaultConfigDir, defaultStateDir } from "./herdr-paths.mjs";
 
 const HERDR = process.env.HERDR_BIN_PATH ?? "herdr";
@@ -71,14 +71,19 @@ const TEXT = {
     choiceExpired: "选择已过期，请重发刚才的消息。",
     renameOk: ({ pane, label, name }) => `✅ 已把 ${pane}${label ? `（${label}）` : ""} 改名为 ${name}。请重发刚才的消息。`,
     renameFailed: (err) => `❌ 改名失败：${err}`,
-    slashNeedsArg: (cmd, example) =>
-      `/${cmd} 不带参数会弹出选择器，钉钉这边没有方向键，用不了。带参数就行，例如 ${example}。`,
     slashInteractive: (cmd) =>
       `/${cmd} 会打开全屏选择界面，需要键盘操作，钉钉这边用不了。请在 Herdr 里直接操。`,
     slashDangerous: (cmd) =>
       `/${cmd} 不在远程允许的范围内（会关掉 agent，或动到凭据和文件）。请在 Herdr 里执行。`,
     slashNoOutput: (cmd) => `/${cmd} 执行了，但屏幕上没有出现新内容。`,
     slashOutput: (cmd, out) => `/${cmd} 的输出：\n\n${out}`,
+    modelList: (list, n) => `可选的模型（当前屏可见 ${n} 个）：\n\n${list}\n\n用 /model <模型 id 的关键词> 切换。关键词要能唯一定位一个模型。`,
+    modelPickerEmpty: "选择器打开了，但没读到任何模型行。",
+    modelPickerFailed: "没能打开模型选择器（屏幕上没出现选择界面）。",
+    modelNoMatch: (term) => `没有匹配「${term}」的模型。过滤是按模型 id 匹配的，例如 deepseek-flash，而不是 deepseek-v4-flash。`,
+    modelAmbiguous: (term, list) => `「${term}」匹配到多个模型，没有替你选：\n\n${list}\n\n换个更具体的关键词再试。`,
+    modelSwitched: (id, provider) => `✅ 已切换到 ${id}（${provider}）。`,
+    modelStuck: "选择器没有关掉，已按 Escape 退出，请确认当前模型。",
     busy: "上一条还在处理中，稍等。",
     handleFailed: (msg) => `桥接出错：${msg}`,
     unsupported: (type) => `只支持文本消息，收到的是 ${type}。图片和文件没法交给 OmO。`,
@@ -103,14 +108,19 @@ const TEXT = {
     choiceExpired: "That choice expired — please resend your message.",
     renameOk: ({ pane, label, name }) => `✅ Renamed ${pane}${label ? ` (${label})` : ""} to ${name}. Resend your message.`,
     renameFailed: (err) => `❌ Rename failed: ${err}`,
-    slashNeedsArg: (cmd, example) =>
-      `/${cmd} opens a picker without an argument, and DingTalk has no arrow keys. Pass an argument instead, e.g. ${example}.`,
     slashInteractive: (cmd) =>
       `/${cmd} opens a full-screen picker that needs a keyboard, which DingTalk cannot drive. Run it in Herdr.`,
     slashDangerous: (cmd) =>
       `/${cmd} is not allowed remotely — it would close the agent or touch credentials and files. Run it in Herdr.`,
     slashNoOutput: (cmd) => `/${cmd} ran, but nothing new appeared on screen.`,
     slashOutput: (cmd, out) => `/${cmd} output:\n\n${out}`,
+    modelList: (list, n) => `Models visible right now (${n}):\n\n${list}\n\nSwitch with /model <a term matching one model id>.`,
+    modelPickerEmpty: "The picker opened but no model rows could be read.",
+    modelPickerFailed: "Could not open the model picker (no picker appeared on screen).",
+    modelNoMatch: (term) => `No model matches "${term}". The filter matches model ids, e.g. deepseek-flash, not deepseek-v4-flash.`,
+    modelAmbiguous: (term, list) => `"${term}" matches several models, so nothing was chosen:\n\n${list}\n\nUse a more specific term.`,
+    modelSwitched: (id, provider) => `✅ Switched to ${id} (${provider}).`,
+    modelStuck: "The picker did not close; escaped out. Check which model is active.",
     busy: "Still working on the previous message.",
     handleFailed: (msg) => `Bridge error: ${msg}`,
     unsupported: (type) => `Text messages only — this one was "${type}". Images and files cannot be handed to OmO.`,
@@ -438,16 +448,6 @@ async function tag(msgId, convId, emoji, { recall = false } = {}) {
 
 // --- Turn handling ----------------------------------------------------------
 
-// Worked examples for the picker commands, so "pass an argument" comes with the
-// actual shape rather than leaving the user to guess it.
-const SLASH_EXAMPLES = {
-  model: "/model deepseek-flash",
-  thinking: "/thinking high",
-  reasoning: "/reasoning off",
-  efforts: "/efforts high",
-  fast: "/fast on",
-};
-
 /**
  * Run a TUI command and return what it drew.
  *
@@ -462,24 +462,105 @@ async function runPaneCommand(paneId, command) {
   // row with identical output and there is no way to tell which copy is new.
   // `recent` returns the whole buffer (150+ lines here), so the old screen stays
   // a genuine prefix and the split is exact.
-  const readBuffer = () => stripAnsi(herdr(["pane", "read", paneId, "--source", "recent", "--lines", "400"]));
-  const before = readBuffer();
+  const readBuf = () => readBuffer(paneId);
+  const before = readBuf();
   const payload = command.replace(/\r?\n/g, " ");
 
   herdr(["pane", "send-text", paneId, payload]);
   await sleep(300);
   herdr(["pane", "send-keys", paneId, "enter"]);
 
-  // Some of these paint on the next frame; /compact or /reload may take a
-  // moment. Poll instead of picking one delay that is wrong for both.
+  // Some of these paint on the next frame; /reload may take a moment. Poll
+  // instead of picking one delay that is wrong for both.
   let out = "";
   for (let i = 0; i < 8; i += 1) {
     await sleep(500);
-    out = pickNewLines(before, readBuffer());
+    out = pickNewLines(before, readBuf());
     if (out) break;
   }
   log("pane command output", JSON.stringify({ command: payload, chars: out.length, head: out.slice(0, 200) }));
   return out;
+}
+
+const readBuffer = (paneId) =>
+  stripAnsi(herdr(["pane", "read", paneId, "--source", "recent", "--lines", "400"]));
+
+// The picker is a full-screen overlay, so the viewport is what shows it. Reading
+// the scrollback here would also pick up rows from earlier picker sessions.
+const readScreen = (paneId) =>
+  stripAnsi(herdr(["pane", "read", paneId, "--source", "visible", "--lines", String(READ_LINES)]));
+
+// The editor prompt is the reliable sign that no overlay is covering the frame.
+const atEditor = (screen) => screen.split("\n").some((l) => l.trim() === "❯");
+
+async function openModelPicker(paneId) {
+  herdr(["pane", "send-text", paneId, "/model"]);
+  await sleep(300);
+  herdr(["pane", "send-keys", paneId, "enter"]);
+
+  for (let i = 0; i < 8; i += 1) {
+    await sleep(400);
+    const screen = readScreen(paneId);
+    if (!atEditor(screen)) return screen;
+  }
+  return null;
+}
+
+const formatPickerRows = (rows) =>
+  rows
+    .map((r) => `${r.highlighted ? "→" : " "} ${r.id} [${r.provider}]${r.active ? " ✓" : ""}`)
+    .join("\n");
+
+/**
+ * `/model` here is not a switch command. Measured against this build: `/model
+ * anything` opens the picker and types the argument into its filter, so
+ * forwarding it and waiting for a session row leaves a modal open and every
+ * later message lands in the filter instead of the agent.
+ *
+ * So the picker is driven explicitly: open it, narrow with the term, and press
+ * Enter only when the filter has left exactly one row. Anything else is a guess
+ * about which model someone meant.
+ */
+async function driveModelPicker(paneId, term) {
+  const screen = await openModelPicker(paneId);
+  if (!screen) {
+    log("!! model picker did not open");
+    return { ok: false, text: t("modelPickerFailed") };
+  }
+
+  const close = () => herdr(["pane", "send-keys", paneId, "escape"]);
+
+  if (!term) {
+    const rows = parsePickerRows(screen);
+    log("model list", JSON.stringify({ rows: rows.length }));
+    close();
+    if (!rows.length) return { ok: false, text: t("modelPickerEmpty") };
+    return { ok: true, text: t("modelList", formatPickerRows(rows), rows.length) };
+  }
+
+  herdr(["pane", "send-text", paneId, term]);
+  await sleep(900);
+  const filtered = parsePickerRows(readScreen(paneId));
+
+  if (filtered.length !== 1) {
+    close();
+    log("model filter", JSON.stringify({ term, matches: filtered.length }));
+    if (!filtered.length) return { ok: false, text: t("modelNoMatch", term) };
+    return { ok: true, text: t("modelAmbiguous", term, formatPickerRows(filtered)) };
+  }
+
+  const chosen = filtered[0];
+  herdr(["pane", "send-keys", paneId, "enter"]);
+  await sleep(1600);
+
+  if (!atEditor(readScreen(paneId))) {
+    close();
+    log("!! model picker did not close after enter");
+    return { ok: false, text: t("modelStuck") };
+  }
+
+  log("model switched", JSON.stringify(chosen));
+  return { ok: true, text: t("modelSwitched", chosen.id, chosen.provider) };
 }
 
 let busy = false;
@@ -659,13 +740,16 @@ async function handle(msg) {
       return;
     }
 
-    if (slash.kind === SLASH.INTERACTIVE || slash.kind === SLASH.NEEDS_ARG) {
-      const example = SLASH_EXAMPLES[slash.command] ?? "";
-      await push(
-        msg.sessionWebhook,
-        slash.kind === SLASH.NEEDS_ARG ? t("slashNeedsArg", slash.command, example) : t("slashInteractive", slash.command),
-      );
+    if (slash.kind === SLASH.INTERACTIVE) {
+      await push(msg.sessionWebhook, t("slashInteractive", slash.command));
       await finish(false);
+      return;
+    }
+
+    if (slash.kind === SLASH.MODEL) {
+      const result = await driveModelPicker(paneId, slash.arg);
+      await push(msg.sessionWebhook, result.text);
+      await finish(result.ok);
       return;
     }
 

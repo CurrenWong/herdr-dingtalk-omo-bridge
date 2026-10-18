@@ -375,14 +375,32 @@ Files over 20 MB are refused rather than pulled into the workspace.
 OmO's slash commands are handled by the TUI, not the model, so **nothing is
 written to the session log** — the bridge would otherwise wait out its full
 timeout for an answer that cannot arrive. They are decided before anything is
-typed:
+typed, and the lists below contain only what was actually run and watched, not
+what the docs claim:
 
 | | Commands | What the bridge does |
 |---|---|---|
-| Runs and reports | `/session` `/help` `/hotkeys` `/changelog` `/reload` `/compact` `/new` `/rename`, and `/model <id>` `/thinking <level>` `/reasoning on\|off` `/efforts <level>` `/fast on\|off` | Sends it, then reads the new lines off the screen and replies with them |
-| Needs a keyboard | `/sessions` `/resume` `/settings` `/tree` `/fork` `/clone` `/scoped-models` `/keybindings` `/llama`, and any of the above without its argument | Refused with the reason. A picker left open would swallow every following message into its filter |
-| Refused | `/quit` `/exit` `/login` `/logout` `/import` `/trust` | Refused. These close the agent the bridge talks to, or touch credentials and files |
+| Verified inline | `/session` `/hotkeys` `/changelog` `/reload` | Runs it, reads the new lines off the screen, replies with them |
+| Driven picker | `/model`, `/model <term>` | See below |
+| Refused — overlay | `/help` (measured: full-screen help), plus `/sessions` `/resume` `/settings` `/tree` `/fork` `/clone` `/scoped-models` `/keybindings` `/llama` `/copy` `/export` | Refused. A picker left open swallows every following message into its filter |
+| Refused — untested | `/thinking` `/reasoning` `/efforts` `/fast` `/compact` `/new` `/rename` | Refused until someone watches what they actually do |
+| Refused — destructive | `/quit` `/exit` `/login` `/logout` `/import` `/trust` | Refused. These close the agent or touch credentials and files |
 | Passed through | `/skill:name`, prompt templates, extension commands | Sent as an ordinary prompt — those *do* reach the model |
+
+**`/model` is not a switch command.** Documented as one; measured otherwise:
+`/model anything` opens the picker and types the argument into its filter. So the
+bridge drives the picker explicitly — open it, narrow with the term, and press
+Enter only when the filter has left exactly one row, then confirm the picker
+closed. Any other outcome escapes out and says so, because guessing which model
+someone meant is not something to do to their session.
+
+Two things worth knowing before using it:
+
+- The filter matches **model ids**, not display names. `deepseek-v4-flash` finds
+  nothing because the id is `deepseek-flash`.
+- The picker is scoped to the **current provider**, so `/model` alone lists that
+  provider's models rather than all 43 in the catalog. Switching provider is not
+  something the bridge does.
 
 Reading the screen back needs care, because a TUI repaints rather than appends
 and the same command run twice produces identical output. The bridge reads the
@@ -580,19 +598,33 @@ If you get it running elsewhere, widening the manifest to
 **标签是独立的 REST 调用**，需要 app accessToken（Stream 长连接本身拿不到），
 所以任何失败都只记日志、绝不吞掉正文回复。`LAB_EMOTIONS=0` 可整体关闭。
 
-**魔法命令（斜杠命令）需要单独处理。** OmO 的 `/session`、`/model` 这类命令由界面自己
-处理，**不写会话日志**；桥如果按普通消息发过去，会白等满整个超时。所以发送前先分类：
+**魔法命令（斜杠命令）需要单独处理。** OmO 的 `/session` 这类命令由界面自己处理，
+**不写会话日志**；桥如果按普通消息发过去，会白等满整个超时。下面这些分类只包含**实际跑过
+并看过结果**的命令，不是照文档推断的：
 
 | | 命令 | 桥的做法 |
 |---|---|---|
-| 能跑 | `/session` `/help` `/hotkeys` `/changelog` `/reload` `/compact` `/new` `/rename`，以及带参数的 `/model <id>` `/thinking <level>` `/reasoning on\|off` `/efforts <level>` `/fast on\|off` | 发过去，然后把屏幕上新增的内容读回来发给你 |
-| 要键盘 | `/sessions` `/resume` `/settings` `/tree` `/fork` `/clone` `/scoped-models` `/keybindings` `/llama`，以及上面那些不带参数的 | 拒绝并说明。留着选择器比拒绝更糟——之后每条消息都会被输入进它的搜索框 |
-| 拒绝 | `/quit` `/exit` `/login` `/logout` `/import` `/trust` | 拒绝。会关掉桥正在对话的 agent，或动到凭据和文件 |
+| 实测可跑 | `/session` `/hotkeys` `/changelog` `/reload` | 发过去，把屏幕新增内容读回来 |
+| 驱动选择器 | `/model`、`/model <关键词>` | 见下 |
+| 拒绝·会弹框 | `/help`（实测是全屏帮助），以及 `/sessions` `/resume` `/settings` `/tree` `/fork` `/clone` `/scoped-models` `/keybindings` `/llama` `/copy` `/export` | 拒绝。留着选择器，之后每条消息都会被输入进它的搜索框 |
+| 拒绝·未验证 | `/thinking` `/reasoning` `/efforts` `/fast` `/compact` `/new` `/rename` | 在有人看过它真实行为之前一律拒绝 |
+| 拒绝·危险 | `/quit` `/exit` `/login` `/logout` `/import` `/trust` | 拒绝。会关掉 agent，或动到凭据和文件 |
 | 放行 | `/skill:name`、prompt 模板、扩展注册的命令 | 当普通提示词发过去——这些**确实**会到模型 |
 
-读屏有个坑：TUI 是重绘而不是追加，同一条命令跑两次输出一模一样，按文本比对分不出
-新旧。所以桥读的是回滚缓冲（`--source recent`）而不是视口，旧屏才是新屏的真前缀，
-切分点唯一。
+**`/model` 不是切换命令。** 文档说是，实测不是：`/model 任何东西` 都是打开选择器并把
+参数当成过滤词。所以桥改成显式驱动——打开、用关键词收窄、**只有剩下一行时**才按回车，
+按完再确认选择器已关闭。其它情况一律 Escape 退出并说明，因为猜“你想切哪个模型”是对
+别人的会话动手。
+
+用之前要知道两件事：
+
+- 过滤匹配的是**模型 id**，不是显示名。`deepseek-v4-flash` 搜不到，因为 id 是 `deepseek-flash`。
+- 选择器只列**当前 provider** 的模型，所以 `/model` 看到的是这个 provider 的那几个，不是
+  目录里全部 43 个。切换 provider 桥不做。
+
+读屏还有个坑：TUI 是重绘而不是追加，同一条命令跑两次输出一模一样，按文本比对分不出
+新旧。所以桥读的是回滚缓冲（`--source recent`）而不是视口，旧屏才是新屏的真前缀。
+
 
 **图片和文件会被取回来。** 图片消息本身不含图片，只有一个 `downloadCode`；桥拿它
 去换临时下载地址、把字节存进 OmO 自己的工作目录，然后把**绝对路径**告诉 OmO（字节

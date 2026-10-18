@@ -7,14 +7,15 @@
  * out its full timeout and then report "no answer". So they cannot simply be
  * forwarded as prompts.
  *
- * They split three ways:
+ * What each one does is not something to infer from documentation. `/model <id>`
+ * is documented as switching the model; measured against this build, it opens
+ * the picker and types the argument into its filter. `/help` is documented as an
+ * overlay and is one. So the lists below only contain what was actually run and
+ * watched:
  *
- *   supported   runs, prints something, returns to the editor. Sent to the pane
- *               and the newly drawn lines are read back off the screen.
- *   interactive opens a picker that needs arrow keys. Unusable from a phone, and
- *               worse than useless: while it is open, the next DingTalk message
- *               is typed into the picker's filter instead of the agent.
- *   dangerous   kills the agent, touches credentials, or moves files. Refused.
+ *   inline      ran, printed, returned to the editor.
+ *   modal       left a full-screen overlay open.
+ *   unattempted never tested, so treated as unsafe.
  *
  * An unknown command — `/skill:name`, a prompt template, an extension command —
  * is left alone and sent through as text, because those DO reach the model and
@@ -24,19 +25,22 @@
 export const SLASH = {
   NONE: "none",
   SUPPORTED: "supported",
-  NEEDS_ARG: "needs-arg",
+  MODEL: "model",
   INTERACTIVE: "interactive",
   DANGEROUS: "dangerous",
 };
 
-// Run it and read the screen. None of these need a choice.
-const SUPPORTED = new Set(["session", "help", "hotkeys", "changelog", "reload", "compact", "new", "rename"]);
+// Verified: prints inline and returns to the editor.
+const SUPPORTED = new Set(["session", "hotkeys", "changelog", "reload"]);
 
-// Useful only with an argument (`/model <id>`); bare, they open a picker.
-const NEEDS_ARG = new Set(["model", "thinking", "reasoning", "efforts", "fast"]);
+// Needs its picker driven rather than typed at; see parsePickerRows.
+const MODEL = new Set(["model"]);
 
-// Open a picker or a full-screen UI and wait for keys.
+// Either verified as a modal, or never tested. Both are refused: an overlay left
+// open swallows every following message into its filter, and the bot looks like
+// it is working while receiving nothing.
 const INTERACTIVE = new Set([
+  "help", // measured: full-screen help overlay
   "sessions",
   "resume",
   "settings",
@@ -48,10 +52,18 @@ const INTERACTIVE = new Set([
   "llama",
   "copy",
   "export",
+  // never attempted — do not guess
+  "thinking",
+  "reasoning",
+  "efforts",
+  "fast",
+  "compact",
+  "new",
+  "rename",
 ]);
 
-// Refused outright. /quit and /exit end the agent the bridge is talking to, and
-// the pane closes with it; the rest touch credentials or the filesystem.
+// Refused outright. /quit and /exit end the agent the bridge talks to, and the
+// pane closes with it; the rest touch credentials or the filesystem.
 const DANGEROUS = new Set(["quit", "exit", "login", "logout", "import", "trust"]);
 
 /**
@@ -72,13 +84,62 @@ export function classifySlash(text) {
   if (command.includes(":")) return { kind: SLASH.NONE, command, arg };
 
   if (DANGEROUS.has(command)) return { kind: SLASH.DANGEROUS, command, arg };
-  if (NEEDS_ARG.has(command)) {
-    return { kind: arg ? SLASH.SUPPORTED : SLASH.NEEDS_ARG, command, arg };
-  }
+  if (MODEL.has(command)) return { kind: SLASH.MODEL, command, arg };
   if (SUPPORTED.has(command)) return { kind: SLASH.SUPPORTED, command, arg };
   if (INTERACTIVE.has(command)) return { kind: SLASH.INTERACTIVE, command, arg };
 
   return { kind: SLASH.NONE, command, arg };
+}
+
+/**
+ * Rows of the model picker, as drawn:
+ *
+ *     →   deepseek-flash [deepseek] ✓
+ *         deepseek-v4-pro [deepseek]
+ *
+ * The arrow marks the highlighted row and the tick marks the model in use. The
+ * filter matches model ids, not display names — `deepseek-v4-flash` finds
+ * nothing because the id is `deepseek-flash`, which is worth knowing before
+ * typing a term at it.
+ */
+export function parsePickerRows(screen) {
+  const rows = [];
+  for (const raw of String(screen ?? "").replace(/\r/g, "").split("\n")) {
+    const line = raw.trim();
+    const m = line.match(/^(→)?\s*([^\s[]+)\s+\[([^\]]+)\]\s*(✓)?$/);
+    if (!m) continue;
+    rows.push({
+      id: m[2],
+      provider: m[3].trim(),
+      highlighted: Boolean(m[1]),
+      active: Boolean(m[4]),
+    });
+  }
+  return rows;
+}
+
+const isRule = (line) => /^[─═━╌┄┈]{3,}$/.test(line);
+
+const CHROME = [
+  /^❯\s*$/,
+  /^>\s*$/,
+  /\bmem:\S+\s+\d+\s*[smhd]\s+ago\b/i,
+  /\bshift\+tab\b/i,
+  /•\s*CH\d/i,
+];
+
+function isChrome(line) {
+  return CHROME.some((re) => re.test(line));
+}
+
+// Drop the chrome that sits at the bottom of every frame. Rules are dropped
+// wherever they appear, not just at the end: one sits between the old output and
+// the new block, so leaving it in makes the overlap test miss by a line.
+function scrollback(lines) {
+  const kept = lines.filter((l) => !isRule(l));
+  let end = kept.length;
+  while (end > 0 && isChrome(kept[end - 1])) end -= 1;
+  return kept.slice(0, end);
 }
 
 /**
@@ -89,11 +150,10 @@ export function classifySlash(text) {
  * word identical. Matching by text then finds nothing new and falls back to the
  * whole screen, which ships the previous output along with the current one.
  *
- * Position is the reliable signal. The TUI keeps a fixed block of chrome at the
- * bottom (rule, editor, rule, status bar) and inserts output above it, scrolling
- * older lines off the top. So: strip the chrome from both screens, then find how
- * much of the old scrollback is still visible as the head of the new one. What
- * follows that overlap is what the command just printed.
+ * Position is the reliable signal: output is appended to a scrollback whose tail
+ * the viewport shows, so the old screen is not a prefix of the new one — it is
+ * shifted left as lines are pushed off the top. `after` begins at `before[d:]`,
+ * and everything after the overlap is new.
  */
 export function pickNewLines(beforeText, afterText, { keep = 30 } = {}) {
   const before = scrollback(splitLines(beforeText));
@@ -114,29 +174,8 @@ function splitLines(text) {
     .filter(Boolean);
 }
 
-// Drop the chrome that sits at the bottom of every frame. Rules are dropped
-// wherever they appear, not just at the end: one sits between the old output and
-// the new block, so leaving it in makes the overlap test miss by a line.
-function scrollback(lines) {
-  const kept = lines.filter((l) => !isRule(l));
-  let end = kept.length;
-  while (end > 0 && isChrome(kept[end - 1])) end -= 1;
-  return kept.slice(0, end);
-}
-
-function isRule(line) {
-  return /^[─═━╌┄┈]{3,}$/.test(line);
-}
-
-// Where the new screen picks up the old one.
-//
-// Output is appended to a scrollback that the viewport shows the tail of, so the
-// old screen is not a prefix of the new one — it is shifted left as lines are
-// pushed off the top: `after` begins at `before[d:]`. Find the smallest d that
-// makes that true; everything after `before.length - d` lines is new.
-//
-// Returns -1 when the screens do not align at all (a modal replaced the view),
-// in which case the caller shows what is there.
+// Where the new screen picks up the old one. Returns -1 when the screens do not
+// align at all (a modal replaced the view).
 function scrollOffset(before, after) {
   for (let d = 0; d <= before.length; d += 1) {
     const rest = before.slice(d);
@@ -153,18 +192,4 @@ function scrollOffset(before, after) {
     if (same) return d;
   }
   return -1;
-}
-
-// Everything the TUI draws around the content: rules, the editor prompt, and the
-// status line with its path/branch/model/memory segments.
-const CHROME = [
-  /^❯\s*$/,
-  /^>\s*$/,
-  /\bmem:\S+\s+\d+\s*[smhd]\s+ago\b/i,
-  /\bshift\+tab\b/i,
-  /•\s*CH\d/i,
-];
-
-function isChrome(line) {
-  return CHROME.some((re) => re.test(line));
 }
