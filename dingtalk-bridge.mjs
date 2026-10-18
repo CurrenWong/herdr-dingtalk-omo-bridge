@@ -24,7 +24,7 @@ import { saveAttachment } from "./attachments.mjs";
 import { ACTIONS, classifyInbound } from "./inbound.mjs";
 import { assistantMessagesSince, lastAssistantText } from "./session-log.mjs";
 import { CHOICE_TTL_MS, agentChoices, parseChoice, selectAgent } from "./agent-target.mjs";
-import { SLASH, classifySlash, parsePickerRows, pickNewLines } from "./slash.mjs";
+import { SLASH, classifySlash, parsePickerRows, parseSessionReport, pickNewLines } from "./slash.mjs";
 import { DEFAULT_PLUGIN_ID, defaultConfigDir, defaultStateDir } from "./herdr-paths.mjs";
 
 const HERDR = process.env.HERDR_BIN_PATH ?? "herdr";
@@ -77,6 +77,39 @@ const TEXT = {
       `/${cmd} 不在远程允许的范围内（会关掉 agent，或动到凭据和文件）。请在 Herdr 里执行。`,
     slashNoOutput: (cmd) => `/${cmd} 执行了，但屏幕上没有出现新内容。`,
     slashOutput: (cmd, out) => `/${cmd} 的输出：\n\n${out}`,
+    // The raw /session output puts labels and values on separate lines and wraps
+    // long paths mid-name, which is unreadable on a phone. This is the same data
+    // laid out to be scanned.
+    sessionReport: (r = {}) => {
+      const m = r.messages ?? {};
+      const k = r.tokens ?? {};
+      const c = r.cost ?? {};
+      const rows = ["📊 当前会话", ""];
+
+      if (r.name) rows.push(`名称   ${r.name}`);
+      if (r.id) rows.push(`ID     ${r.id}`);
+
+      if (m.total) {
+        rows.push("");
+        const parts = [`${m.total} 条`];
+        if (m.user) parts.push(`你 ${m.user}`);
+        if (m.assistant) parts.push(`OmO ${m.assistant}`);
+        if (m.tools) parts.push(`工具 ${m.tools} 次`);
+        rows.push(`消息   ${parts.join(" · ")}`);
+      }
+      if (k.total) {
+        rows.push(`Token  ${k.total}`);
+        const detail = [];
+        if (k.input) detail.push(`输入 ${k.input}`);
+        if (k.output) detail.push(`输出 ${k.output}`);
+        if (detail.length) rows.push(`       ${detail.join(" · ")}`);
+      }
+      if (k.cached) {
+        rows.push(`缓存   命中 ${k.cached}（${k.cachedPct}%）${k.uncached ? ` · 未命中 ${k.uncached}` : ""}`);
+      }
+      if (c.total) rows.push(`费用   ${c.total}`);
+      return rows.join("\n");
+    },
     modelList: (list, n) => `可选的模型（当前屏可见 ${n} 个）：\n\n${list}\n\n用 /model <模型 id 的关键词> 切换。关键词要能唯一定位一个模型。`,
     modelPickerEmpty: "选择器打开了，但没读到任何模型行。",
     modelPickerFailed: "没能打开模型选择器（屏幕上没出现选择界面）。",
@@ -114,6 +147,36 @@ const TEXT = {
       `/${cmd} is not allowed remotely — it would close the agent or touch credentials and files. Run it in Herdr.`,
     slashNoOutput: (cmd) => `/${cmd} ran, but nothing new appeared on screen.`,
     slashOutput: (cmd, out) => `/${cmd} output:\n\n${out}`,
+    sessionReport: (r = {}) => {
+      const m = r.messages ?? {};
+      const k = r.tokens ?? {};
+      const c = r.cost ?? {};
+      const rows = ["📊 Session", ""];
+
+      if (r.name) rows.push(`Name    ${r.name}`);
+      if (r.id) rows.push(`ID      ${r.id}`);
+
+      if (m.total) {
+        rows.push("");
+        const parts = [`${m.total} messages`];
+        if (m.user) parts.push(`you ${m.user}`);
+        if (m.assistant) parts.push(`OmO ${m.assistant}`);
+        if (m.tools) parts.push(`${m.tools} tool calls`);
+        rows.push(`Messages  ${parts.join(" · ")}`);
+      }
+      if (k.total) {
+        rows.push(`Tokens    ${k.total}`);
+        const detail = [];
+        if (k.input) detail.push(`in ${k.input}`);
+        if (k.output) detail.push(`out ${k.output}`);
+        if (detail.length) rows.push(`          ${detail.join(" · ")}`);
+      }
+      if (k.cached) {
+        rows.push(`Cache     ${k.cached} hit (${k.cachedPct}%)${k.uncached ? ` · ${k.uncached} uncached` : ""}`);
+      }
+      if (c.total) rows.push(`Cost      ${c.total}`);
+      return rows.join("\n");
+    },
     modelList: (list, n) => `Models visible right now (${n}):\n\n${list}\n\nSwitch with /model <a term matching one model id>.`,
     modelPickerEmpty: "The picker opened but no model rows could be read.",
     modelPickerFailed: "Could not open the model picker (no picker appeared on screen).",
@@ -754,6 +817,19 @@ async function handle(msg) {
     }
 
     const out = await runPaneCommand(paneId, verdict.text);
+
+    // /session has a fixed shape, so lay it out instead of echoing the screen.
+    // Anything that does not parse falls through to the raw text.
+    if (slash.command === "session") {
+      const report = parseSessionReport(out);
+      if (report) {
+        await push(msg.sessionWebhook, t("sessionReport", report));
+        await finish(true);
+        return;
+      }
+      log("!! /session output did not parse", JSON.stringify(out.slice(0, 200)));
+    }
+
     await push(msg.sessionWebhook, out ? t("slashOutput", slash.command, out) : t("slashNoOutput", slash.command));
     await finish(true);
     return;

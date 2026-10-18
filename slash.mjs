@@ -118,6 +118,142 @@ export function parsePickerRows(screen) {
   return rows;
 }
 
+/**
+ * The `/session` report, parsed into fields.
+ *
+ * Dumping the raw screen back is unreadable on a phone: the TUI prints a label
+ * on one line and its value on the next, and a long path gets wrapped mid-name
+ * by the terminal. Both are rendering artefacts of a 120-column screen, not
+ * information, so they are undone here and the caller renders something a person
+ * can scan.
+ *
+ * Returns null when the text does not look like the report, so a surprising
+ * output falls back to raw rather than being mangled.
+ */
+export function parseSessionReport(text) {
+  const rows = String(text ?? "")
+    .replace(/\r/g, "")
+    .split("\n")
+    .map((l) => l.trim())
+    .filter(Boolean);
+  if (!rows.length) return null;
+
+  const report = {
+    name: "",
+    file: "",
+    id: "",
+    messages: { total: "", user: "", assistant: "", tools: "" },
+    tokens: { input: "", cached: "", cachedPct: "", uncached: "", output: "", total: "" },
+    cost: { total: "", rebilled: "" },
+  };
+
+  // "Messages" / "Tokens" / "Cost" start blocks, and `Total:` appears in two of
+  // them, so the meaning of a bare number depends on where it sits.
+  let section = "";
+  let inFile = false;
+
+  for (const row of rows) {
+    if (/^(session info|session)$/i.test(row)) {
+      section = "info";
+      inFile = false;
+      continue;
+    }
+    if (/^messages$/i.test(row)) {
+      section = "messages";
+      inFile = false;
+      continue;
+    }
+    if (/^tokens$/i.test(row)) {
+      section = "tokens";
+      inFile = false;
+      continue;
+    }
+    if (/^cost$/i.test(row)) {
+      section = "cost";
+      inFile = false;
+      continue;
+    }
+
+    // The path is printed across as many lines as the terminal needs.
+    if (inFile) {
+      if (/^(id|messages|tokens|cost)\b/i.test(row)) inFile = false;
+      else {
+        report.file += row;
+        continue;
+      }
+    }
+
+    let m;
+    if ((m = row.match(/^name:\s*(.+)$/i))) {
+      report.name = m[1];
+      continue;
+    }
+    if (/^file:\s*$/i.test(row)) {
+      inFile = true;
+      continue;
+    }
+    if ((m = row.match(/^file:\s*(.+)$/i))) {
+      report.file = m[1];
+      continue;
+    }
+    if ((m = row.match(/^id:\s*(\S+)/i))) {
+      report.id = m[1];
+      continue;
+    }
+    if ((m = row.match(/^total:\s*([\d,]+)\s*\(\s*([\d.]+)%\s*\)/i))) {
+      // "Cache Re-billed: $0.000 (1,330 tokens, 1 miss)" — different shape.
+      continue;
+    }
+    if ((m = row.match(/^user:\s*([\d,]+)/i))) {
+      report.messages.user = m[1];
+      continue;
+    }
+    if ((m = row.match(/^assistant:\s*([\d,]+)/i))) {
+      report.messages.assistant = m[1];
+      continue;
+    }
+    if ((m = row.match(/^tools:\s*([\d,]+)\s*calls?,\s*([\d,]+)\s*results?/i))) {
+      report.messages.tools = m[1];
+      continue;
+    }
+    if ((m = row.match(/^total:\s*([\d,]+)$/i))) {
+      if (section === "messages") report.messages.total = m[1];
+      else if (section === "tokens") report.tokens.total = m[1];
+      continue;
+    }
+    if ((m = row.match(/^input:\s*([\d,]+)/i))) {
+      report.tokens.input = m[1];
+      continue;
+    }
+    if ((m = row.match(/^cached:\s*([\d,]+)\s*\(\s*([\d.]+)%\s*\)/i))) {
+      report.tokens.cached = m[1];
+      report.tokens.cachedPct = m[2];
+      continue;
+    }
+    if ((m = row.match(/^uncached:\s*([\d,]+)/i))) {
+      report.tokens.uncached = m[1];
+      continue;
+    }
+    if ((m = row.match(/^output:\s*([\d,]+)/i))) {
+      report.tokens.output = m[1];
+      continue;
+    }
+    if ((m = row.match(/^total:\s*(\$[\d.]+)/i))) {
+      if (section === "cost") report.cost.total = m[1];
+      continue;
+    }
+    if ((m = row.match(/^cache re-billed:\s*(\$[\d.]+)/i))) {
+      report.cost.rebilled = m[1];
+      continue;
+    }
+  }
+
+  // Without an id or any token figures this was not the report at all.
+  if (!report.id && !report.tokens.input && !report.messages.total) return null;
+  return report;
+}
+
+
 const isRule = (line) => /^[─═━╌┄┈]{3,}$/.test(line);
 
 const CHROME = [
