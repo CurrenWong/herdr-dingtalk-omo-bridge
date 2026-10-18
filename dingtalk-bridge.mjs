@@ -205,23 +205,27 @@ function agentPaneId() {
  * Nothing to send to. Say what does exist, and when the answer is genuinely a
  * choice, offer the choice: "not found" plus a command to go type somewhere
  * else is a problem handed back rather than solved.
+ *
+ * Returns true when it asked the user a question — the caller tags the message
+ * Done in that case. Tagging a question as Error tells the user something broke
+ * when all that happened is the bridge waiting for a number.
  */
 async function explainNoAgent(msg, miss) {
   if (!miss || miss.reason === "single" || miss.reason === "named") {
     // "single" can only reach here if the pane vanished between two calls.
     await push(msg.sessionWebhook, t("noAgent", AGENT));
-    return;
+    return false;
   }
 
   if (miss.reason === "none") {
     await push(msg.sessionWebhook, t("choiceNone"));
-    return;
+    return false;
   }
 
   const choices = agentChoices(miss.agents);
   if (choices.length < 2) {
     await push(msg.sessionWebhook, t("noAgent", AGENT));
-    return;
+    return false;
   }
 
   pendingChoice = { agents: choices, at: Date.now() };
@@ -234,6 +238,8 @@ async function explainNoAgent(msg, miss) {
     "",
     t("choiceFooter"),
   ].join("\n"));
+
+  return true;
 }
 
 // OmO's session directory name is a slug of the cwd; rather than reproduce the
@@ -539,7 +545,7 @@ async function handle(msg) {
     if (Date.now() - pendingChoice.at >= CHOICE_TTL_MS) {
       pendingChoice = null;
       await push(msg.sessionWebhook, t("choiceExpired"));
-      await finish(false);
+      await finish(true);
       return;
     }
 
@@ -561,9 +567,9 @@ async function handle(msg) {
 
     if (pick.kind === "out-of-range") {
       // Keep the list answerable — a typo should not cost the user the whole
-      // exchange.
+      // exchange, and it is not an error: the bridge is still waiting.
       await push(msg.sessionWebhook, t("choiceInvalid", pendingChoice.agents.length));
-      await finish(false);
+      await finish(true);
       return;
     }
 
@@ -575,8 +581,8 @@ async function handle(msg) {
   const info = agentInfo();
   const paneId = info?.pane_id ?? agentPaneId();
   if (!paneId) {
-    await explainNoAgent(msg, lastMiss);
-    await finish(false);
+    const asked = await explainNoAgent(msg, lastMiss);
+    await finish(asked);
     return;
   }
   log("-> agent", JSON.stringify({ agent: AGENT, pane: paneId, cwd: info?.cwd, status: info?.agent_status }));
