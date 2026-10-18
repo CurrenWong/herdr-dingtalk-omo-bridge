@@ -358,6 +358,9 @@ let lastMiss = null;
 // The numbered list we last sent when the agent name was ambiguous, so a reply
 // of "2" can be matched back to a pane. Cleared once used, answered, expired, or
 // when the user says something that is not a number.
+//
+// Scoped to the conversation that was asked: with more than one allowed sender,
+// a bare "2" from someone else renamed a pane chosen for a different chat.
 let pendingChoice = null;
 
 function agentInfo() {
@@ -413,7 +416,7 @@ async function explainNoAgent(msg, miss) {
     return false;
   }
 
-  pendingChoice = { agents: choices, at: Date.now() };
+  pendingChoice = { conv: msg.conversationId ?? "", agents: choices, at: Date.now() };
   log("ambiguous agent", JSON.stringify({ count: choices.length, panes: choices.map((c) => c.pane) }));
 
   await push(msg.sessionWebhook, [
@@ -949,10 +952,16 @@ async function driveModelPicker(paneId, term) {
   return { ok: true, text: t("modelSwitched", chosen.id, chosen.provider) };
 }
 
-let busy = false;
+// One OmO pane is one interactive session, so a single queue is the honest
+// shape: two turns cannot overlap anyway. What must not be shared is *whose*
+// turn is running — `/abort` from one conversation used to stop another
+// conversation's turn and throw away its queued messages.
+let activeConv = null;
 let pumping = false;
-let abortEpoch = 0;
+const abortEpochs = new Map();
 const queue = [];
+
+const epochOf = (conv) => abortEpochs.get(conv ?? "") ?? 0;
 
 // Drain the queue one message at a time. `pumping` is what keeps a second
 // dispatcher from starting a parallel loop the moment the first message lands.
@@ -962,7 +971,7 @@ async function pump() {
   try {
     while (queue.length) {
       const next = queue.shift();
-      busy = true;
+      activeConv = next.conversationId ?? "";
       try {
         await handle(next);
       } catch (err) {
@@ -970,7 +979,7 @@ async function pump() {
         await push(next.sessionWebhook, t("handleFailed", err.message));
         await tag(next.msgId ?? next.messageId ?? next.message_id ?? "", next.conversationId ?? "", TAG_ERROR);
       } finally {
-        busy = false;
+        activeConv = null;
       }
     }
   } finally {
@@ -986,7 +995,7 @@ const state = { started_at: new Date().toISOString(), seen: 0, last_push: null, 
 // `onProgress` receives the agent's narration as it happens. Those messages are
 // useless as an answer but genuinely useful while waiting, especially for turns
 // that spend a minute installing a package first.
-async function askAgent(paneId, text, cwd, onProgress) {
+async function askAgent(paneId, text, cwd, onProgress, conv = "") {
   const snap = sessionFileForCwd(cwd);
   log("session snapshot", JSON.stringify({ file: snap?.path ?? null, size: snap?.size ?? 0 }));
   const paneBefore = TARGET ? readPane(paneId) : "";
@@ -1043,7 +1052,7 @@ async function askAgent(paneId, text, cwd, onProgress) {
   // timeout: Esc stops the agent, but an interrupted turn never produces a final
   // assistant message, so there is nothing to wake it up and the queue behind it
   // would stall for five minutes.
-  const myAbortEpoch = abortEpoch;
+  const myAbortEpoch = epochOf(conv);
   // Narration is deduped by byte offset so a row seen on two polls is not sent
   // twice. Capped because DingTalk rate-limits a robot to ~20 messages/minute.
   const narrated = new Set();
@@ -1092,7 +1101,7 @@ async function askAgent(paneId, text, cwd, onProgress) {
         ok: false,
       };
     }
-    if (abortEpoch !== myAbortEpoch) {
+    if (epochOf(conv) !== myAbortEpoch) {
       log("turn interrupted by /abort");
       // `aborted` is not `ok: false`. Nothing failed — the user asked for this —
       // but the message still has no answer, so it cannot be reported as a
@@ -1151,7 +1160,10 @@ async function handle(msg) {
 
   // A bare number answering our "which OmO?" list. Resolved before anything is
   // sent to an agent, or the digit itself would become the prompt.
-  if (pendingChoice) {
+  //
+  // Only the conversation that was asked may answer it. Anyone else's message is
+  // an ordinary message: it must neither consume the list nor clear it.
+  if (pendingChoice && pendingChoice.conv === convId) {
     const pick = parseChoice(verdict.text, pendingChoice.agents.length);
 
     if (Date.now() - pendingChoice.at >= CHOICE_TTL_MS) {
@@ -1222,19 +1234,27 @@ async function handle(msg) {
 
     if (slash.kind === SLASH.BRIDGE) {
       if (slash.command === "abort") {
-        const wasBusy = busy;
-        const dropped = queue.length;
-        queue.length = 0;
-        // Bumping the epoch is what actually frees the turn: Esc stops the agent,
-        // but an interrupted turn never produces a final assistant message, so the
-        // wait loop would sit there until the answer timeout and the queue behind
-        // it would stall for five minutes.
-        abortEpoch += 1;
-        // Esc is what the TUI itself uses to interrupt a turn.
-        herdr(["pane", "send-keys", paneId, "escape"]);
-        await sleep(600);
+        // Only the conversation whose turn is running can stop it.
+        const wasBusy = activeConv === convId;
+        let dropped = 0;
+        for (let i = queue.length - 1; i >= 0; i -= 1) {
+          if ((queue[i].conversationId ?? "") === convId) {
+            queue.splice(i, 1);
+            dropped += 1;
+          }
+        }
+        if (wasBusy) {
+          // Bumping this conversation's epoch is what actually frees the turn:
+          // Esc stops the agent, but an interrupted turn never produces a final
+          // assistant message, so the wait loop would sit there until the answer
+          // timeout and the queue behind it would stall for five minutes.
+          abortEpochs.set(convId, epochOf(convId) + 1);
+          // Esc is what the TUI itself uses to interrupt a turn.
+          herdr(["pane", "send-keys", paneId, "escape"]);
+          await sleep(600);
+        }
         const after = agentInfo();
-        log("abort", JSON.stringify({ wasBusy, dropped, status: after?.agent_status ?? "unknown" }));
+        log("abort", JSON.stringify({ wasBusy, dropped, conv: convId, status: after?.agent_status ?? "unknown" }));
         await push(msg.sessionWebhook, wasBusy ? t("aborted", dropped) : t("notAborting"));
         // The abort itself did what was asked, whether or not the agent noticed.
         await finish(true);
@@ -1340,7 +1360,7 @@ async function handle(msg) {
   const answer = await askAgent(paneId, promptText, info?.cwd, async (progress) => {
     // Marked so a running commentary is never mistaken for the result.
     await push(msg.sessionWebhook, t("progress", progress.slice(0, 800)));
-  });
+  }, convId);
   // An interrupted turn has no answer to push — `/abort` already said so — and
   // pushing an empty body would post a blank message.
   if (answer.text) {
@@ -1396,15 +1416,16 @@ client.registerCallbackListener(TOPIC_ROBOT, (res) => {
     // the turn that is filling the queue, and the second to explain why nothing
     // is moving.
     if (BRIDGE_URGENT.test(String(msg?.text?.content ?? "").trim())) {
-      busy = true;
+      // Nothing here marks the bridge busy: only pump() owns a turn, and the
+      // dispatcher always queues ordinary messages. A `/status` arriving mid-turn
+      // used to set this flag and clear it on the way out, which made the next
+      // `/abort` report "nothing is running" while a turn was in fact running.
       try {
         await handle(msg);
       } catch (err) {
         log("!! handle failed", err.message);
         await push(msg.sessionWebhook, t("handleFailed", err.message));
         await tag(msgId, convId, TAG_ERROR);
-      } finally {
-        busy = false;
       }
       return;
     }

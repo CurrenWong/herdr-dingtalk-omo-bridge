@@ -37,6 +37,26 @@ export function downloadCodeOf(msg) {
 }
 
 /**
+ * A path that does not overwrite anything already in `dir`.
+ *
+ * The name is deterministic — the sender's filename, else the message id — so
+ * two attachments can resolve to the same path: a second photo called
+ * `IMG_0001.jpg`, or two messages with no msgId. The first file was silently
+ * replaced, and the caller still handed the agent the same path, now holding a
+ * different picture.
+ */
+export function availablePath(dir, name) {
+  const dot = name.lastIndexOf(".");
+  const stem = dot > 0 ? name.slice(0, dot) : name;
+  const ext = dot > 0 ? name.slice(dot) : "";
+  let candidate = join(dir, name);
+  for (let n = 2; existsSync(candidate); n += 1) {
+    candidate = join(dir, `${stem}-${n}${ext}`);
+  }
+  return candidate;
+}
+
+/**
  * A safe, stable filename for a saved attachment.
  *
  * Prefers the name the sender used (file messages carry `fileName`), because a
@@ -94,19 +114,58 @@ export async function saveAttachment({ msg, robotCode, accessToken, dir }) {
   const file = await fetch(url);
   if (!file.ok) throw new Error(`downloadUrl fetch failed: HTTP ${file.status}`);
 
+  // The header is a hint, not a promise: a chunked response has none at all, and
+  // a bogus one is just a number. The body is read in chunks and abandoned the
+  // moment the running total passes the limit, so an oversized (or lying)
+  // response cannot fill the heap before anyone looks at its size.
   const declared = Number(file.headers.get("content-length") ?? 0);
   if (declared > MAX_BYTES) {
     throw new Error(`attachment is ${Math.round(declared / 1048576)}MB, limit is ${MAX_BYTES / 1048576}MB`);
   }
-  const buf = Buffer.from(await file.arrayBuffer());
-  if (buf.length > MAX_BYTES) {
-    throw new Error(`attachment is ${Math.round(buf.length / 1048576)}MB, limit is ${MAX_BYTES / 1048576}MB`);
-  }
+
+  const buf = await readCapped(file, MAX_BYTES);
 
   const contentType = file.headers.get("content-type") ?? "";
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-  const path = join(dir, attachmentName(msg, contentType));
-  writeFileSync(path, buf);
+  const path = availablePath(dir, attachmentName(msg, contentType));
+  // Write beside the target and rename: a full disk or a kill mid-write used to
+  // leave a truncated file under the real name, which the agent would then read.
+  const temp = `${path}.${process.pid}.part`;
+  writeFileSync(temp, buf);
+  renameSync(temp, path);
 
   return { path, bytes: buf.length, contentType };
+}
+
+/**
+ * Read a response body, giving up as soon as it exceeds `limit`.
+ *
+ * `arrayBuffer()` is the obvious call and the wrong one: it has already buffered
+ * the whole body by the time its length can be checked.
+ */
+export async function readCapped(res, limit) {
+  const tooBig = () => new Error(`attachment is larger than the ${limit / 1048576}MB limit`);
+
+  const reader = res.body?.getReader();
+  if (!reader) {
+    const whole = Buffer.from(await res.arrayBuffer());
+    if (whole.length > limit) throw tooBig();
+    return whole;
+  }
+
+  const chunks = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > limit) {
+      try {
+        await reader.cancel();
+      } catch {}
+      throw tooBig();
+    }
+    chunks.push(Buffer.from(value));
+  }
+  return Buffer.concat(chunks);
 }
