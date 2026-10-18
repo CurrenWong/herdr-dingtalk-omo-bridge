@@ -57,6 +57,10 @@ jobs:
         # listed in `files` explicitly. Without it the npx installer cannot run
         # npm ci, so check rather than assume.
         run: |
+          # Default Linux shell is `bash -e` without pipefail, so a failing
+          # `npm pack` would be masked by `tee`'s exit status and the grep loop
+          # below would report a missing file instead of the real pack error.
+          set -o pipefail
           npm pack --dry-run 2>&1 | tee /tmp/pack.txt
           for f in npm-shrinkwrap.json herdr-plugin.toml installer.mjs bin/herdr-dingtalk-omo-bridge.mjs; do
             grep -q "$f" /tmp/pack.txt || { echo "::error::$f missing from the tarball"; exit 1; }

@@ -16,7 +16,15 @@ const CONFIG_DIR =
   defaultConfigDir(process.env.HERDR_PLUGIN_ID ?? DEFAULT_PLUGIN_ID);
 
 function loadDotEnv(path) {
-  for (const raw of readFileSync(path, "utf8").split(/\r?\n/)) {
+  let text;
+  try {
+    text = readFileSync(path, "utf8");
+  } catch {
+    // No .env yet is a normal state before registration. The check below names
+    // the missing variables; a stack trace here explained nothing.
+    return;
+  }
+  for (const raw of text.split(/\r?\n/)) {
     const line = raw.trim();
     if (!line || line.startsWith("#")) continue;
     const eq = line.indexOf("=");
@@ -29,25 +37,58 @@ function loadDotEnv(path) {
 }
 loadDotEnv(join(CONFIG_DIR, ".env"));
 
+// Fail where the mistake is. Undefined credentials used to go straight into the
+// OAuth call, and the only signal was a raw API error that did not name the
+// missing variable.
+const missing = ["DINGTALK_CLIENT_ID", "DINGTALK_CLIENT_SECRET"].filter((name) => !process.env[name]);
+if (missing.length) {
+  console.error(`missing ${missing.join(", ")}`);
+  console.error(`  looked in ${join(CONFIG_DIR, ".env")} and the environment`);
+  console.error("  run the auth action to register the bot, or set them yourself");
+  process.exit(2);
+}
+
 const CLIENT_ID = process.env.DINGTALK_CLIENT_ID;
 const CLIENT_SECRET = process.env.DINGTALK_CLIENT_SECRET;
-const ROBOT_CODE = process.env.DINGTALK_ROBOT_CODE || CLIENT_ID; // QwenPaw: robot_code = DINGTALK_ROBOT_CODE || CLIENT_ID
+// QwenPaw: robot_code = DINGTALK_ROBOT_CODE || CLIENT_ID. Say which one is in
+// use — a wrong robot code is otherwise invisible until some 4xx.
+const ROBOT_CODE = process.env.DINGTALK_ROBOT_CODE || CLIENT_ID;
+console.log(
+  `robot_code: ${process.env.DINGTALK_ROBOT_CODE ? "DINGTALK_ROBOT_CODE" : "DINGTALK_CLIENT_ID (fallback)"}`,
+);
+
+const API = "https://api.dingtalk.com";
+const TIMEOUT_MS = 15000;
 
 async function getAccessToken() {
-  const r = await fetch("https://api.dingtalk.com/v1.0/oauth2/accessToken", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ appKey: CLIENT_ID, appSecret: CLIENT_SECRET }),
-  });
-  const j = await r.json();
-  return j;
+  let r;
+  try {
+    r = await fetch(`${API}/v1.0/oauth2/accessToken`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ appKey: CLIENT_ID, appSecret: CLIENT_SECRET }),
+      signal: AbortSignal.timeout(TIMEOUT_MS),
+    });
+  } catch (err) {
+    console.log(`TOKEN FAILED (network) ${err.message}`);
+    process.exit(1);
+  }
+  const body = await r.text();
+  let json = null;
+  try {
+    json = JSON.parse(body);
+  } catch {
+    // An HTML or empty body is a failure in itself, and the status and the body
+    // are the only things that explain it.
+  }
+  if (!r.ok || !json?.accessToken) {
+    console.log(`TOKEN FAILED HTTP ${r.status} ${body.slice(0, 300)}`);
+    process.exit(1);
+  }
+  return json;
 }
 
 const token = await getAccessToken();
-if (!token.accessToken) {
-  console.log("TOKEN FAILED", JSON.stringify(token));
-  process.exit(1);
-}
 console.log("token OK, expireIn =", token.expireIn, "len =", token.accessToken.length);
 
 // The conversation id from a real inbound message the bridge already handled.
@@ -55,34 +96,64 @@ const CONV = process.argv[2] ?? "";
 const MSG = process.argv[3] ?? "dummy-open-msg-id";
 
 async function emotion(pathname, emoji, recall) {
-  const r = await fetch(`https://api.dingtalk.com${pathname}`, {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      "x-acs-dingtalk-access-token": token.accessToken,
-    },
-    body: JSON.stringify({
-      robotCode: ROBOT_CODE,
-      openMsgId: MSG,
-      openConversationId: CONV,
-      emotionType: 2,
-      emotionName: emoji,
-      textEmotion: {
-        emotionId: "2659900",
-        emotionName: emoji,
-        text: emoji,
-        backgroundId: "im_bg_1",
+  const label = recall ? "recall" : "reply  ";
+  let r;
+  try {
+    r = await fetch(`${API}${pathname}`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-acs-dingtalk-access-token": token.accessToken,
       },
-    }),
-  });
+      body: JSON.stringify({
+        robotCode: ROBOT_CODE,
+        openMsgId: MSG,
+        openConversationId: CONV,
+        emotionType: 2,
+        emotionName: emoji,
+        textEmotion: {
+          emotionId: "2659900",
+          emotionName: emoji,
+          text: emoji,
+          backgroundId: "im_bg_1",
+        },
+      }),
+      signal: AbortSignal.timeout(TIMEOUT_MS),
+    });
+  } catch (err) {
+    // Without this the probe died with an unhandled rejection instead of the
+    // verdict it exists to print.
+    console.log(`${label} FAILED ${err.message}`);
+    return { status: 0, json: null, text: "" };
+  }
   const text = await r.text();
-  console.log(`${recall ? "recall" : "reply  "} HTTP ${r.status} ${text.slice(0, 400)}`);
-  return { status: r.status, text };
+  let json = null;
+  try {
+    json = JSON.parse(text);
+  } catch {}
+  console.log(`${label} HTTP ${r.status} ${text.slice(0, 400)}`);
+  return { status: r.status, json, text };
+}
+
+// A dummy msgId is expected back as a business rejection — that is what proves
+// the token, the route and the body shape are right. A 2xx passes too. An auth
+// error, an HTML error page or a network failure does not.
+//
+// The check reads the parsed code/message, not the raw text: the old regex
+// matched the word "message", which appears in success bodies and unrelated
+// errors alike.
+function businessRejection(res) {
+  if (!res.json) return false;
+  const code = String(res.json.code ?? res.json.errcode ?? "");
+  const message = String(res.json.message ?? res.json.errmsg ?? "");
+  return /invalid|not.?found|not.?exist|不存在|无效/i.test(`${code} ${message}`);
 }
 
 const add = await emotion("/v1.0/robot/emotion/reply", "👌Received", false);
-const del = await emotion("/v1.0/robot/emotion/recall", "👌Received", true);
+await emotion("/v1.0/robot/emotion/recall", "👌Received", true);
 
-const businessish = (s) => /not found|不存在|invalid|not exist|message/i.test(s);
-console.log("\nverdict:", add.status === 200 && businessish(add.text) ? "ENDPOINT OK (dummy msgId rejected as expected)" : "CHECK OUTPUT ABOVE");
-process.exit(add.status === 200 ? 0 : 1);
+// One boolean decides both the verdict and the exit code, so they cannot
+// disagree the way they did when the exit code looked at HTTP 200 alone.
+const ok = add.status === 200 || businessRejection(add);
+console.log(`\nverdict: ${ok ? "ENDPOINT OK (dummy msgId rejected as expected)" : "CHECK OUTPUT ABOVE"}`);
+process.exit(ok ? 0 : 1);
