@@ -144,6 +144,57 @@ for (const dep of Object.keys(pkg.dependencies ?? {})) {
 
 console.log(`lockfile entries:   ${lockEntries.length} (${lockEntries.length - missingPinned} fully pinned)`);
 
+// Every locally-imported module must be in `files`.
+//
+// `files` is an explicit allowlist, so splitting logic into a new .mjs file and
+// forgetting to list it produces a package that installs cleanly and then dies
+// with MODULE_NOT_FOUND on first use — after publishing, on someone's machine.
+// Nothing else in this repo would notice: the source tree has the file, so both
+// CI and local runs pass.
+const importers = [
+  "dingtalk-bridge.mjs",
+  "installer.mjs",
+  "startup.mjs",
+  "check-reply.mjs",
+  "supervise.mjs",
+  "attachments.mjs",
+  "inbound.mjs",
+  "session-log.mjs",
+  "agent-target.mjs",
+  "bin/herdr-dingtalk-omo-bridge.mjs",
+].filter((f) => existsSync(join(root, f)));
+
+const shippable = new Set(
+  (pkg.files ?? []).flatMap((entry) =>
+    entry.endsWith("/")
+      ? [] // directory entries need a listing; checked below instead
+      : [entry],
+  ),
+);
+const shippableDirs = (pkg.files ?? []).filter((e) => e.endsWith("/"));
+
+const localImports = new Set();
+for (const file of importers) {
+  const src = readFileSync(join(root, file), "utf8");
+  for (const m of src.matchAll(/^import[^;]*?from\s+["'](\.\/[^"']+|\.\.\/[^"']+)["']/gm)) {
+    localImports.add(m[1].replace(/^\.\//, ""));
+  }
+}
+
+const unshipped = [];
+for (const spec of localImports) {
+  if (shippable.has(spec)) continue;
+  if (shippableDirs.some((d) => spec.startsWith(d))) continue;
+  unshipped.push(spec);
+}
+
+console.log(`local imports:      ${localImports.size} checked, ${unshipped.length} missing from files`);
+if (unshipped.length) {
+  for (const u of unshipped) {
+    problems.push(`"${u}" is imported but not listed in package.json "files" — the published package would fail with MODULE_NOT_FOUND`);
+  }
+}
+
 console.log("");
 if (problems.length) {
   console.error("FAIL:");

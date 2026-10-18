@@ -306,7 +306,7 @@ normally only touch the `DINGTALK_*` and `LAB_*` ones, which can live in the
 | `DINGTALK_CLIENT_SECRET` | — | AppSecret. Written by the `auth` action. |
 | `DINGTALK_ROBOT_CODE` | = `DINGTALK_CLIENT_ID` | Sent as `robotCode` by the emotion API. |
 | `DINGTALK_ALLOW_STAFF` | *(empty)* | Comma-separated staff IDs. **Empty means no allowlist** — see [Security notes](#security-notes). |
-| `LAB_TARGET_AGENT` | `dingtalk` | Name of the Herdr agent the bridge types into. |
+| `LAB_TARGET_AGENT` | `dingtalk` | Name of the Herdr agent the bridge types into. Herdr forgets names across restarts, so if no agent carries this name the bridge falls back to the only agent and logs `!! agent not named …`. |
 | `LAB_TARGET_PANE` | *(empty)* | Legacy: a bare pane id, used only if the agent cannot be resolved. |
 | `LAB_AGENT_TIMEOUT_MS` | `300000` | How long to wait for an answer before giving up. |
 | `LAB_EMOTIONS` | `1` | Set to `0` to disable the 👌/🥳/☹️ message tags. |
@@ -457,7 +457,7 @@ node startup.mjs     # with the HERDR_* plugin env vars set
 | Symptom | Cause |
 |---|---|
 | Message gets no reply, bridge log stops after `session snapshot` | The prompt never reached OmO. Check the byte size of the newest session JSONL in `~/.omo/agent/sessions/<cwd>/` — if it did not grow, it is an input-delivery problem, not an answer-extraction one. |
-| `agent get dingtalk` → `agent_not_found` | The OmO pane is gone. Re-run `startup.mjs`. |
+| `agent get dingtalk` → `agent_not_found` | The OmO pane is gone, **or it came back under a different name**. Herdr does not remember an agent's name across restarts, so a fresh OmO pane is `pi` again. The bridge adopts the only agent automatically; with several agents it refuses to guess and tells you which ones exist. Fix with `herdr agent rename <pane_id> dingtalk`, or set `LAB_TARGET_AGENT` to the name you actually have. |
 | `⚠️ OmO 卡在一个需要确认的界面上` | OmO is blocked on a prompt it needs you to answer. Look at the pane. |
 | Bridge never connects | Another Stream client is already using this app. DingTalk permits exactly one connection per app — check for a second `dingtalk-bridge.mjs`. |
 | Tags never appear | Run `node probe-emotion.mjs <conv-id>`, and confirm the app has the robot capability that allows emotions. |

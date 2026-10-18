@@ -23,6 +23,7 @@ import { DWClient, TOPIC_ROBOT } from "dingtalk-stream";
 import { saveAttachment } from "./attachments.mjs";
 import { ACTIONS, classifyInbound } from "./inbound.mjs";
 import { assistantMessagesSince, lastAssistantText } from "./session-log.mjs";
+import { describeMiss, selectAgent } from "./agent-target.mjs";
 import { DEFAULT_PLUGIN_ID, defaultConfigDir, defaultStateDir } from "./herdr-paths.mjs";
 
 const HERDR = process.env.HERDR_BIN_PATH ?? "herdr";
@@ -139,13 +140,29 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // --- Herdr agent plumbing ---------------------------------------------------
 
+// Why the last agentInfo() call found nothing, so the reply can explain it.
+let lastMiss = null;
+
 function agentInfo() {
+  let agents = [];
   try {
-    return herdrJson(["agent", "get", AGENT]).result?.agent ?? null;
+    agents = herdrJson(["agent", "list"]).result?.agents ?? [];
   } catch (err) {
-    log("!! agent get failed", err.message);
+    log("!! agent list failed", err.message);
     return null;
   }
+
+  const { agent, reason } = selectAgent(agents, AGENT);
+  if (reason === "single") {
+    // Not an error: OmO restarted and Herdr forgot the name it had. Say so once
+    // per message rather than silently, so the fallback is visible.
+    log("!! agent not named " + AGENT + ", using the only one", JSON.stringify({
+      agent: agent.agent, name: agent.name ?? null, pane: agent.pane_id,
+    }));
+  } else if (!agent) {
+    lastMiss = { reason, agents };
+  }
+  return agent;
 }
 
 function agentPaneId() {
@@ -450,7 +467,11 @@ async function handle(msg) {
   const info = agentInfo();
   const paneId = info?.pane_id ?? agentPaneId();
   if (!paneId) {
-    await push(msg.sessionWebhook, t("noAgent", AGENT));
+    // Say which agents do exist and how to point the bridge at one — "not
+    // found" alone leaves the user guessing at an invisible rename.
+    await push(msg.sessionWebhook, lastMiss
+      ? describeMiss(lastMiss.reason, AGENT, lastMiss.agents)
+      : t("noAgent", AGENT));
     await finish(false);
     return;
   }

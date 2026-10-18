@@ -18,6 +18,7 @@
     "bin/",
     "installer.mjs",
     "herdr-plugin.toml",
+    "agent-target.mjs",
     "attachments.mjs",
     "auth.mjs",
     "check-reply.mjs",
