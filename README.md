@@ -366,9 +366,15 @@ The bridge saves the result into `<agent cwd>/.dingtalk-inbox/` (override with
 `LAB_ATTACHMENT_DIR`) and sends the agent a prompt naming that path, so it can
 open the file with its usual tools. Names are sanitised but keep their script:
 `账单 2026.pdf` survives as `账单_2026.pdf` rather than being reduced to
-`_2026.pdf`.
+`_2026.pdf`. A name that already exists gets `-2`, `-3`: the name is derived from
+the sender's filename or the message id, so a second `IMG_0001.jpg` used to
+overwrite the first while the agent was handed the same path.
 
-Files over 20 MB are refused rather than pulled into the workspace.
+Files over 20 MB are refused — while downloading, not afterwards. The body is
+read in chunks and abandoned the moment the running total passes the limit,
+because a `content-length` check only protects against a response that tells the
+truth about its size. Bytes go to a temp name and are renamed into place, so an
+interrupted write cannot leave a truncated file under the real name.
 
 ### Slash commands
 
@@ -391,10 +397,12 @@ what the docs claim:
 **`/abort` and `/status` are the bridge's own commands.** Neither name appears in
 OmO's command table, so nothing is shadowed, and neither has a TUI equivalent to
 forward to. `/abort` sends Esc — what the TUI itself uses to interrupt a turn —
-clears the queue, and bumps an abort epoch. The epoch is not bookkeeping: an
-interrupted turn never produces a final assistant message, so without it the
-answer loop would sit there until the five-minute timeout and every message
-behind it would wait too. `/status` answers from what the bridge already knows:
+drops that conversation's queued messages, and bumps its abort epoch. The epoch
+is not bookkeeping: an interrupted turn never produces a final assistant message,
+so without it the answer loop would sit there until the five-minute timeout and
+every message behind it would wait too. All three are scoped to the conversation
+that owns the running turn: with more than one allowed sender, an `/abort` from
+one chat used to stop another chat's turn and throw away its queue. `/status` answers from what the bridge already knows:
 uptime, which pane the agent resolved to, its `agent_status`, the working
 directory, the session file being read, queue depth, and when the last message
 arrived.
@@ -402,9 +410,11 @@ arrived.
 **Messages that arrive mid-turn queue instead of vanishing.** The old answer was
 `稍等` and the text was dropped, which is the wrong trade on a phone — a follow-up
 thought is exactly what gets lost. Up to `LAB_QUEUE_LIMIT` (default 3) are kept
-and run in order; a full queue says so rather than silently discarding. The two
-urgent commands jump the queue, since waiting behind a turn to stop that turn is
-useless.
+and run in order; a full queue says so rather than silently discarding. A message
+that is merely next in line gets no reply at all — the 👌 tag already says it
+arrived, and a headcount of zero is noise; the queue depth is announced only when
+something is ahead of it. The two urgent commands jump the queue, since waiting
+behind a turn to stop that turn is useless.
 
 **While busy, the two commands that must not wait are recognised before queuing**,
 which is also why they are matched against the trimmed text at the call site: in
@@ -629,9 +639,10 @@ If you get it running elsewhere, widening the manifest to
 
 - **Only verified on Windows**, for the reason above. The manifest is
   deliberately conservative rather than claiming untested support.
-- **The OmO pane does not self-heal.** A supervised TUI breaks message
-  delivery, so if OmO exits the agent stays down until the next Herdr restart.
-  The bridge detects this and says so rather than hanging.
+- **The OmO process heals, its pane does not.** If `omo` exits but the pane is
+  still there, the bridge restarts it in place. If Herdr has reclaimed the pane
+  itself, there is nothing to type into and the agent stays down until the next
+  Herdr restart — the bridge says so rather than hanging.
 - **The agent pane is the whole session.** One OmO instance serves every
   conversation; concurrent senders queue rather than run in parallel.
 - **Tied to OmO's session-log format.** Another agent would need its own
@@ -642,8 +653,9 @@ If you get it running elsewhere, widening the manifest to
   Whether the agent can *interpret* the contents depends on its model — a
   non-multimodal model will say it cannot read an image, which is the agent's
   answer to give, not the bridge's.
-- **One turn at a time.** A message that arrives mid-turn gets "still working on
-  the previous one" instead of queueing.
+- **One turn at a time.** A message that arrives mid-turn is queued behind it
+  (up to `LAB_QUEUE_LIMIT`, default 3), not run in parallel — the agent is a
+  single interactive session, so two prompts at once would interleave.
 - **No allowlist by default**, which on a shared bot is a real exposure. See
   [Security notes](#security-notes).
 
@@ -692,16 +704,18 @@ If you get it running elsewhere, widening the manifest to
 | 放行 | `/skill:name`、prompt 模板、扩展注册的命令 | 当普通提示词发过去——这些**确实**会到模型 |
 
 **`/abort` 和 `/status` 是桥自己的命令。** 两个名字都不在 OmO 的命令表里，不会撞名，
-而且在 TUI 里也没有可转发的东西。`/abort` 发 Esc（TUI 自己就是这么打断的）、清空队列、
-再抬一次 abort epoch。epoch 不是记账：被打断的一轮不会产出最终回复，没有它，等答案的
-循环会一直坐到五分钟超时，后面排队的消息全都跟着等。`/status` 只答桥已经知道的事：
-运行多久、agent 落在哪个 pane、`agent_status`、工作目录、正在读的会话文件、队列深度、
-上一条消息什么时候到的。
+而且在 TUI 里也没有可转发的东西。`/abort` 发 Esc（TUI 自己就是这么打断的）、丢掉**本会话**
+排队的消息、再抬一次**本会话**的 abort epoch。epoch 不是记账：被打断的一轮不会产出最终
+回复，没有它，等答案的循环会一直坐到五分钟超时，后面排队的消息全都跟着等。这三件事都按
+会话隔离——一旦允许多个发送者，一个会话的 `/abort` 曾经会打断另一个会话的轮次、并清空
+它的队列。`/status` 只答桥已经知道的事：运行多久、agent 落在哪个 pane、`agent_status`、
+工作目录、正在读的会话文件、队列深度、上一条消息什么时候到的。
 
 **跑到一半收到的消息会排队，而不是消失。** 以前是回一句「稍等」然后把正文丢掉，这在
 手机上是笔亏的买卖——补一句「顺便看第 3 页」正是最容易丢的东西。默认最多留
-`LAB_QUEUE_LIMIT`（3）条并按序执行；队列满了会明说，不会悄悄吞掉。两个紧急命令可以
-插队，因为排在某一轮后面去中止那一轮，没有任何意义。
+`LAB_QUEUE_LIMIT`（3）条并按序执行；队列满了会明说，不会悄悄吞掉。只是排在队首、前面
+没有别的消息时**不回复**——👌 标签已经表示收到了，"前面还有 0 条"是噪音，只有真积压时
+才报数量。两个紧急命令可以插队，因为排在某一轮后面去中止那一轮，没有任何意义。
 
 **被 blocked 时，把「它在问什么」一起发过来。** 「去 Herdr 里看一眼」没法让拿着手机的
 人判断这个待确认值不值得打断手上的事；当背后那个工具是危险命令时，这个差别是安全问题。
@@ -759,8 +773,11 @@ terminal attach is not supported on Windows yet"。
 
 **图片和文件会被取回来。** 图片消息本身不含图片，只有一个 `downloadCode`；桥拿它
 去换临时下载地址、把字节存进 OmO 自己的工作目录，然后把**绝对路径**告诉 OmO（字节
-不进 prompt，避免把上下文和模型都不支持的二进制塞进去）。超过 20 MB 会直接拒绝。
-语音、群里的富文本这类既没有文本也没有 `downloadCode` 的消息，才会明确回一句
+不进 prompt，避免把上下文和模型都不支持的二进制塞进去）。超过 20 MB 在**下载途中**就
+拒掉，不是下完再查：`content-length` 只能防住一个说实话的响应，块传输根本没有这个头。
+字节先写临时文件名再改名，写到一半被杀也不会留下一个名叫真名、内容是截断的文件。
+同名附件不会覆盖，会依次变成 `-2`、`-3`（名字来自发件人文件名或消息 id，两个不同的文件
+很容易撞名，而交出去的是同一个路径）。语音、群里的富文本这类既没有文本也没有 `downloadCode` 的消息，才会明确回一句
 「只支持文本消息」——静默跟机器人挂了是分不清的。
 
 **过程也会推给你。** 一轮任务可能要装包、试错、绕坑，过去这段时间是完全静默的。
@@ -774,9 +791,10 @@ terminal attach is not supported on Windows yet"。
 **⚠️ 默认没有白名单。** `DINGTALK_ALLOW_STAFF` 不设的话，任何能给这个机器人
 发消息的人都能驱动你本机的 OmO 读写文件、跑命令。正式用请务必设置。
 
-**已知限制**：仅 Windows；OmO pane 不会自愈（原因见上，只能等下次 Herdr 重启，
-但桥会明确告诉你而不是干等）；单个 OmO 实例服务所有会话，并发消息排队；回答
-提取绑死在 OmO 的会话日志格式上，换 agent 需要另写适配器。
+**已知限制**：仅 Windows；`omo` 进程挂了会在原 pane 里被拉起来，但**pane 本身**被 Herdr
+回收之后就没东西可敲了，只能等下次 Herdr 重启（桥会明确告诉你而不是干等）；单个 OmO 实例
+服务所有会话，并发消息排队（默认上限 3 条）；回答提取绑死在 OmO 的会话日志格式上，换 agent
+需要另写适配器。
 
 ---
 
