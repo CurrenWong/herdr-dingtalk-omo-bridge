@@ -11,6 +11,14 @@
     "plugin"
   ],
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/CurrenWong/herdr-dingtalk-omo-bridge.git"
+  },
+  "bugs": {
+    "url": "https://github.com/CurrenWong/herdr-dingtalk-omo-bridge/issues"
+  },
+  "homepage": "https://github.com/CurrenWong/herdr-dingtalk-omo-bridge#readme",
   "type": "module",
   "engines": {
     "node": ">=20"
