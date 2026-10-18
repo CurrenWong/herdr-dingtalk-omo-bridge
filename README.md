@@ -22,12 +22,30 @@ when Herdr restarts, and leaves you a TUI you can watch while it works.
 - [Requirements](#requirements)
 - [Install](#install)
 - [Configuration](#configuration)
+- [Platform support](#platform-support)
 - [How it works](#how-it-works)
 - [Operations](#operations)
 - [Troubleshooting](#troubleshooting)
 - [Security notes](#security-notes)
 - [Known limitations](#known-limitations)
 - [中文说明](#中文说明)
+
+---
+
+## Contributing
+
+```bash
+npm ci
+npm run check          # syntax-check every shipped script
+npm run check-paths    # platform-correct config/state resolution
+npm run scan-secrets   # pattern-based leak scan (runs in CI too)
+```
+
+CI runs on Linux, macOS and Windows. Keep it green on all three — that is what
+stops a Windows-shaped assumption from creeping back in.
+
+The secret scanner is deliberately **pattern-based**. Pinning known credential
+values into it would leak them into the public repository the moment it ran.
 
 ---
 
@@ -84,7 +102,7 @@ second Stream connection when one is already live.
 | | |
 |---|---|
 | Herdr | ≥ 0.9.0 (developed against 0.9.3) |
-| OS | Windows (declared `platforms = ["windows"]` in the manifest) |
+| OS | **Verified on Windows 11.** See [Platform support](#platform-support). |
 | Node | ≥ 20 (developed against 24) |
 | OmO | the `omo` CLI on `PATH` |
 | DingTalk | a robot app with **Stream mode** enabled |
@@ -354,10 +372,36 @@ Credentials live in two places, neither of which belongs in git:
 `state/` is gitignored for exactly this reason. If you ever commit it by
 hand, **rotate the AppSecret in the DingTalk console immediately.**
 
+## Platform support
+
+The manifest declares `platforms = ["windows"]`, and that is a statement about
+what has actually been **tested end to end**, not about what the code needs.
+Here is the honest breakdown:
+
+| Piece | Status |
+|---|---|
+| Herdr itself | Runs on Linux, macOS and Windows — its own docs use `platforms = ["linux", "macos", "windows"]` |
+| OmO (`omo-ai`) | No `os`/`cpu` constraint in its manifest; the entry point is a Node script. Its installer ships a POSIX `curl \| sh` path |
+| `dingtalk-stream` | Pure JavaScript WebSocket client |
+| This plugin's code | No Windows-only dependency. Config/state paths resolve per platform (`AppData` on Windows, `~/Library/Application Support` on macOS, XDG on Linux) |
+
+**What has not been verified:** the actual DingTalk round trip — a Stream
+connection, a tagged reply — has only ever run on Windows 11, because that is
+the only machine with OmO, a DingTalk app, and Herdr set up. A Linux or macOS
+user may well find it works; the plugin just does not promise that.
+
+CI runs on all three operating systems (Node 20 and 24) and enforces the parts
+that can be checked without credentials: dependency install, syntax, path
+resolution across platforms, and a committed-pattern secret scan. See
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml).
+
+If you get it running elsewhere, widening the manifest to
+`["linux", "macos", "windows"]` is a one-line change — please open a PR.
+
 ## Known limitations
 
-- **Windows only.** The manifest declares `platforms = ["windows"]`, and the
-  Herdr CLI paths are Windows-flavoured.
+- **Only verified on Windows**, for the reason above. The manifest is
+  deliberately conservative rather than claiming untested support.
 - **The OmO pane does not self-heal.** A supervised TUI breaks message
   delivery, so if OmO exits the agent stays down until the next Herdr restart.
   The bridge detects this and says so rather than hanging.
@@ -365,6 +409,8 @@ hand, **rotate the AppSecret in the DingTalk console immediately.**
   conversation; concurrent senders queue rather than run in parallel.
 - **Tied to OmO's session-log format.** Another agent would need its own
   reply-extraction adapter (`sessionFileForCwd` / `lastAssistantText`).
+- **No allowlist by default**, which on a shared bot is a real exposure. See
+  [Security notes](#security-notes).
 
 ## 中文说明
 

@@ -14,6 +14,7 @@
 import { spawn } from "node:child_process";
 import { appendFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
+import { DEFAULT_PLUGIN_ID, defaultStateDir } from "./herdr-paths.mjs";
 
 const [command, ...args] = process.argv.slice(2);
 if (!command) {
@@ -23,7 +24,7 @@ if (!command) {
 
 const STATE_DIR =
   process.env.HERDR_PLUGIN_STATE_DIR ??
-  join(process.env.LOCALAPPDATA ?? "", "herdr", "plugins", process.env.HERDR_PLUGIN_ID ?? "dingtalk-omo-bridge");
+  defaultStateDir(process.env.HERDR_PLUGIN_ID ?? DEFAULT_PLUGIN_ID);
 const LOG = join(STATE_DIR, "supervise.log");
 const LABEL = args.length ? `${command} ${args.join(" ")}` : command;
 

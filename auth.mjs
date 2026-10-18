@@ -11,6 +11,7 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { DEFAULT_PLUGIN_ID, defaultConfigDir } from "./herdr-paths.mjs";
 
 const API = "https://oapi.dingtalk.com";
 const SOURCE = process.env.DT_SOURCE ?? "HERDR";
@@ -93,11 +94,11 @@ function resolveConfigDir() {
     return process.env.HERDR_PLUGIN_CONFIG_DIR;
   }
   const herdr = process.env.HERDR_BIN_PATH ?? "herdr";
-  const id = process.env.HERDR_PLUGIN_ID ?? "dingtalk-omo-bridge";
+  const id = process.env.HERDR_PLUGIN_ID ?? DEFAULT_PLUGIN_ID;
   const r = spawnSync(herdr, ["plugin", "config-dir", id], { encoding: "utf8", timeout: 15000 });
   const dir = (r.stdout ?? "").trim();
   if (r.status === 0 && dir) return dir;
-  return join(process.env.LOCALAPPDATA ?? "", "herdr", "plugins", "config", id);
+  return defaultConfigDir(id);
 }
 
 function writeEnv(clientId, clientSecret) {

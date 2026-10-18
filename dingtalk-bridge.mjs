@@ -20,16 +20,13 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statS
 import { homedir } from "node:os";
 import { join, resolve as resolvePath } from "node:path";
 import { DWClient, TOPIC_ROBOT } from "dingtalk-stream";
+import { DEFAULT_PLUGIN_ID, defaultConfigDir, defaultStateDir } from "./herdr-paths.mjs";
 
 const HERDR = process.env.HERDR_BIN_PATH ?? "herdr";
-const PLUGIN_ID = process.env.HERDR_PLUGIN_ID ?? "dingtalk-omo-bridge";
+const PLUGIN_ID = process.env.HERDR_PLUGIN_ID ?? DEFAULT_PLUGIN_ID;
 // Herdr injects these; the fallbacks just keep the file runnable by hand.
-const CONFIG_DIR =
-  process.env.HERDR_PLUGIN_CONFIG_DIR ??
-  join(process.env.APPDATA ?? "", "herdr", "plugins", "config", PLUGIN_ID);
-const STATE_DIR =
-  process.env.HERDR_PLUGIN_STATE_DIR ??
-  join(process.env.LOCALAPPDATA ?? "", "herdr", "plugins", PLUGIN_ID);
+const CONFIG_DIR = process.env.HERDR_PLUGIN_CONFIG_DIR ?? defaultConfigDir(PLUGIN_ID);
+const STATE_DIR = process.env.HERDR_PLUGIN_STATE_DIR ?? defaultStateDir(PLUGIN_ID);
 
 // The Herdr agent name hosting the OmO session (set with `herdr agent rename`).
 const AGENT = process.env.LAB_TARGET_AGENT ?? "dingtalk";

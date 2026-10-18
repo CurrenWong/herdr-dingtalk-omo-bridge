@@ -9,16 +9,11 @@
 // Credentials come from the plugin .env; nothing secret is printed.
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { DEFAULT_PLUGIN_ID, defaultConfigDir } from "./herdr-paths.mjs";
 
 const CONFIG_DIR =
   process.env.HERDR_PLUGIN_CONFIG_DIR ??
-  join(
-    process.env.APPDATA ?? "",
-    "herdr",
-    "plugins",
-    "config",
-    process.env.HERDR_PLUGIN_ID ?? "dingtalk-omo-bridge",
-  );
+  defaultConfigDir(process.env.HERDR_PLUGIN_ID ?? DEFAULT_PLUGIN_ID);
 
 function loadDotEnv(path) {
   for (const raw of readFileSync(path, "utf8").split(/\r?\n/)) {
