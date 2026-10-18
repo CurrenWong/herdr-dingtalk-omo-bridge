@@ -1001,7 +1001,11 @@ async function askAgent(paneId, text, cwd, onProgress) {
     if (snap) {
       const fresh = sessionFileForCwd(cwd);
       const file = fresh && fresh.path !== snap.path ? fresh : snap;
-      const fromByte = snap.path === file.path ? snap.size : 0;
+      // A file that appeared mid-turn is not this turn's answer. OmO keys
+      // sessions by cwd, so the new file can already contain an earlier turn —
+      // reading it from zero returned that turn's answer as this reply. Resume
+      // where the file is now and wait for rows written after the switch.
+      const fromByte = snap.path === file.path ? snap.size : file.size;
 
       if (onProgress) {
         for (const m of assistantMessagesSince(file, fromByte)) {

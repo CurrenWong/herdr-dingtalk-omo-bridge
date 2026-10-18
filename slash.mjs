@@ -441,15 +441,20 @@ const isVolatile = (line) => VOLATILE.some((re) => re.test(line));
  * used to collapse the overlap to zero — and zero overlap meant "all of it is
  * new", so a single ticking number could turn a one-line answer into a screenful
  * of old conversation.
+ *
+ * An empty result means "nothing new was drawn", and callers poll on exactly
+ * that. It used to fall back to the tail of the screen instead, which is the
+ * conversation from before the command — so a command that had not painted yet
+ * on the first poll returned the previous turn's text, the poll loop broke, and
+ * the old answer shipped as the answer.
  */
 export function pickNewLines(beforeText, afterText, { keep = 30 } = {}) {
   const before = scrollback(splitLines(beforeText));
   const after = scrollback(splitLines(afterText));
   if (!after.length) return "";
 
-  const fresh = freshLines(before, after);
-  const chosen = trimVolatile(fresh.length ? fresh : after.slice(-keep));
-  return chosen.slice(-keep).join("\n").trim();
+  const fresh = trimVolatile(freshLines(before, after));
+  return fresh.slice(-keep).join("\n").trim();
 }
 
 function splitLines(text) {

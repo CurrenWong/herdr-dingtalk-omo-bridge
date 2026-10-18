@@ -54,15 +54,32 @@ let stopping = false;
 let child = null;
 let startedAt = 0;
 let failures = 0;
+// Only one restart may be queued at a time. Node says 'exit' "may or may not"
+// fire after 'error', so a child that both fails to spawn and exits called
+// schedule() twice; the second timer then started a second child and orphaned
+// the first.
+let restartTimer = null;
 
 function start() {
   startedAt = Date.now();
+  let counted = false;
   child = spawn(command, args, { stdio: "inherit", env: process.env, cwd: process.cwd() });
+
+  // One failure, one increment: 'error' and 'exit' can both fire for the same
+  // child, and counting twice would inflate the backoff.
+  const countFailure = () => {
+    if (counted) return;
+    counted = true;
+    failures += 1;
+  };
 
   child.on("error", (err) => {
     // Spawn itself failed (command not found, EACCES...). Back off as usual so
-    // a bad PATH can't turn into a hot loop.
+    // a bad PATH can't turn into a hot loop — which requires counting it:
+    // without the increment, schedule() always computed delayFor(1) and retried
+    // a missing command every second, forever.
     log(`!! spawn failed: ${err.message}`);
+    countFailure();
     schedule();
   });
 
@@ -76,7 +93,7 @@ function start() {
       log(`child ran ${Math.round(uptime / 1000)}s — resetting backoff`);
       failures = 0;
     }
-    failures += 1;
+    countFailure();
     log(
       `child exited (code=${code} signal=${signal} after ${Math.round(uptime / 1000)}s); ` +
         `restart #${failures} in ${delayFor(failures)}ms`,
@@ -90,8 +107,10 @@ function delayFor(failures) {
 }
 
 function schedule() {
+  if (stopping || restartTimer) return;
   const delay = delayFor(Math.max(failures, 1));
-  setTimeout(() => {
+  restartTimer = setTimeout(() => {
+    restartTimer = null;
     if (!stopping) start();
   }, delay);
 }
@@ -99,6 +118,7 @@ function schedule() {
 function shutdown(signal) {
   if (stopping) return;
   stopping = true;
+  if (restartTimer) clearTimeout(restartTimer);
   log(`received ${signal}, stopping child`);
   if (child) {
     try {

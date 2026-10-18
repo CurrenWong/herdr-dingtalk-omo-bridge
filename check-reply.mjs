@@ -42,8 +42,13 @@ function sessionFileForCwd(cwd) {
 }
 
 function lastAssistantText(file, from) {
-  const fd = readFileSync(file.path, "utf8");
-  const slice = from > 0 && from <= fd.length ? fd.slice(from) : fd;
+  // `from` is a BYTE offset — the state file stores statSync().size, and the
+  // bridge's reader (session-log.mjs) slices a Buffer with it. Slicing the
+  // decoded string moves by UTF-16 code units instead, and one Chinese character
+  // is three bytes, so the resume point landed inside a line: this tool reported
+  // an answer that was cut in half, or the previous turn's, with no error.
+  const buf = readFileSync(file.path);
+  const slice = (from > 0 && from <= buf.length ? buf.subarray(from) : buf).toString("utf8");
   let answer = null;
   for (const line of slice.split("\n")) {
     if (!line.trim()) continue;

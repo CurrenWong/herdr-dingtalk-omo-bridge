@@ -34,6 +34,16 @@ const FORBIDDEN = [/^state\//, /(^|\/)\.env(\.|$)/, /(^|\/)node_modules\//, /\.p
 
 const findings = [];
 
+// The report is printed into CI logs, which outlive the run and are readable by
+// anyone with access to the build. Quoting the match would republish the exact
+// value this script exists to keep out of the repository — so report its shape
+// only. The rule name already says what kind it is, and the length is enough to
+// tell which value leaked without being enough to use it.
+function mask(value) {
+  const s = String(value);
+  return s.length <= 6 ? `(${s.length} chars)` : `${s.slice(0, 3)}…(${s.length} chars)`;
+}
+
 function scanFile(path) {
   let text;
   try {
@@ -59,7 +69,7 @@ function scanFile(path) {
     let m;
     while ((m = re.exec(text)) !== null) {
       const line = text.slice(0, m.index).split("\n").length;
-      findings.push({ rel, rule: name, line, snippet: m[0].slice(0, 70) });
+      findings.push({ rel, rule: name, line, snippet: mask(m[0]) });
       if (findings.length > 50) return;
     }
   }

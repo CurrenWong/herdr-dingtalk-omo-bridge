@@ -1,6 +1,6 @@
 id = "dingtalk-omo-bridge"
 name = "DingTalk ↔ OmO Bridge"
-version = "0.1.0"
+version = "0.2.1"
 min_herdr_version = "0.9.3"
 description = "Bridge DingTalk messages to an OmO coding-agent session in Herdr, post the answer back, and tag each message as received/done."
 platforms = ["windows"]
