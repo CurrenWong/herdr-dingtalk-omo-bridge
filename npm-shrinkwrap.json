@@ -1,12 +1,12 @@
 {
   "name": "herdr-dingtalk-omo-bridge",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "lockfileVersion": 3,
   "requires": true,
   "packages": {
     "": {
       "name": "herdr-dingtalk-omo-bridge",
-      "version": "0.2.0",
+      "version": "0.2.1",
       "license": "MIT",
       "dependencies": {
         "dingtalk-stream": "^2.1.6-beta.1"
