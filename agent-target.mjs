@@ -18,7 +18,11 @@
 export function selectAgent(agents, wanted) {
   const list = Array.isArray(agents) ? agents.filter((a) => a?.pane_id) : [];
 
-  const named = list.find((a) => a.agent === wanted || a.name === wanted);
+  // An empty or missing name would match every pane whose `agent` field is
+  // absent (`a.agent === undefined`), and the bridge would type the prompt into
+  // an unrelated pane while reporting reason "named".
+  const want = typeof wanted === "string" ? wanted.trim() : "";
+  const named = want ? list.find((a) => a.agent === want || a.name === want) : null;
   if (named) return { agent: named, reason: "named" };
 
   if (list.length === 1) return { agent: list[0], reason: "single" };

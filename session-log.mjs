@@ -4,7 +4,7 @@
 // polls right after typing a prompt, so a reader that mistakes byte offsets for
 // string indices returns the *previous* turn's answer, reports success, and
 // looks fast while doing it. That happened once already.
-import { existsSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 
 /**
  * Rows appended after `fromByte`.
@@ -16,8 +16,16 @@ import { existsSync, readFileSync } from "node:fs";
  * Returns null when nothing new has been written.
  */
 export function rowsAppendedSince(file, fromByte) {
-  if (!file || !existsSync(file.path)) return null;
-  const buf = readFileSync(file.path);
+  if (!file) return null;
+  // existsSync is a point-in-time answer and this runs inside a poll loop: OmO
+  // rotates its logs, and Windows can lock a file mid-write. A throw here used
+  // to take down the whole answer wait instead of being retried on the next poll.
+  let buf;
+  try {
+    buf = readFileSync(file.path);
+  } catch {
+    return null;
+  }
   if (buf.length <= fromByte) return null;
 
   const rows = [];
@@ -75,7 +83,9 @@ export function assistantMessagesSince(file, fromByte) {
 
     const stillActing = content.some((c) => typeof c !== "string" && (c?.type ?? "") !== "text");
     const text = content
-      .map((c) => (typeof c === "string" ? c : c.text))
+      // A null element in the array survives the check above; dereferencing it
+      // here threw and took the poll down with it.
+      .map((c) => (typeof c === "string" ? c : c?.text))
       .filter((t) => typeof t === "string" && t.trim())
       .map((t) => t.trim())
       .join("\n\n");
