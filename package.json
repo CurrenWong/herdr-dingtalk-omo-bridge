@@ -1,6 +1,6 @@
 {
   "name": "herdr-dingtalk-omo-bridge",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Herdr plugin that bridges DingTalk messages to an OmO coding-agent session, posts the answer back, and tags each message as received/done.",
   "keywords": [
     "herdr",
