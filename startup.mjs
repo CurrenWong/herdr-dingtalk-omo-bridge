@@ -12,7 +12,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
 const HERDR = process.env.HERDR_BIN_PATH ?? "herdr";
-const PLUGIN_ID = process.env.HERDR_PLUGIN_ID ?? "lab.dingtalk-bridge";
+const PLUGIN_ID = process.env.HERDR_PLUGIN_ID ?? "dingtalk-omo-bridge";
 const ROOT = process.env.HERDR_PLUGIN_ROOT ?? process.cwd();
 const STATE_DIR = process.env.HERDR_PLUGIN_STATE_DIR ?? join(ROOT, "state");
 const AGENT = process.env.LAB_TARGET_AGENT ?? "dingtalk";

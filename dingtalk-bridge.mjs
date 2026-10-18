@@ -22,7 +22,7 @@ import { join, resolve as resolvePath } from "node:path";
 import { DWClient, TOPIC_ROBOT } from "dingtalk-stream";
 
 const HERDR = process.env.HERDR_BIN_PATH ?? "herdr";
-const PLUGIN_ID = process.env.HERDR_PLUGIN_ID ?? "lab.dingtalk-bridge";
+const PLUGIN_ID = process.env.HERDR_PLUGIN_ID ?? "dingtalk-omo-bridge";
 // Herdr injects these; the fallbacks just keep the file runnable by hand.
 const CONFIG_DIR =
   process.env.HERDR_PLUGIN_CONFIG_DIR ??

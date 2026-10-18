@@ -17,7 +17,7 @@ const CONFIG_DIR =
     "herdr",
     "plugins",
     "config",
-    process.env.HERDR_PLUGIN_ID ?? "lab.dingtalk-bridge",
+    process.env.HERDR_PLUGIN_ID ?? "dingtalk-omo-bridge",
   );
 
 function loadDotEnv(path) {

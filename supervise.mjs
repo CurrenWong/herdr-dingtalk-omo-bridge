@@ -23,7 +23,7 @@ if (!command) {
 
 const STATE_DIR =
   process.env.HERDR_PLUGIN_STATE_DIR ??
-  join(process.env.LOCALAPPDATA ?? "", "herdr", "plugins", process.env.HERDR_PLUGIN_ID ?? "lab.dingtalk-bridge");
+  join(process.env.LOCALAPPDATA ?? "", "herdr", "plugins", process.env.HERDR_PLUGIN_ID ?? "dingtalk-omo-bridge");
 const LOG = join(STATE_DIR, "supervise.log");
 const LABEL = args.length ? `${command} ${args.join(" ")}` : command;
 

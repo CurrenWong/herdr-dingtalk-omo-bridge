@@ -93,7 +93,7 @@ function resolveConfigDir() {
     return process.env.HERDR_PLUGIN_CONFIG_DIR;
   }
   const herdr = process.env.HERDR_BIN_PATH ?? "herdr";
-  const id = process.env.HERDR_PLUGIN_ID ?? "lab.dingtalk-bridge";
+  const id = process.env.HERDR_PLUGIN_ID ?? "dingtalk-omo-bridge";
   const r = spawnSync(herdr, ["plugin", "config-dir", id], { encoding: "utf8", timeout: 15000 });
   const dir = (r.stdout ?? "").trim();
   if (r.status === 0 && dir) return dir;

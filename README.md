@@ -117,7 +117,7 @@ npm install          # `plugin link` does not run build commands
 ### 3. Register the bot
 
 ```bash
-herdr plugin action invoke lab.dingtalk-bridge.auth
+herdr plugin action invoke dingtalk-omo-bridge.auth
 ```
 
 It writes a QR code to `state/auth/qrcode.png` (or prints a scan URL if no
@@ -244,7 +244,7 @@ Useful commands:
 herdr pane list                                   # are both panes up?
 herdr pane read w2:pK --source recent-unwrapped --lines 40
 herdr agent list                                  # is the agent named "dingtalk"?
-herdr plugin log list --plugin lab.dingtalk-bridge
+herdr plugin log list --plugin dingtalk-omo-bridge
 ```
 
 **Restart the bridge** — kill the child and the supervisor relaunches it in
