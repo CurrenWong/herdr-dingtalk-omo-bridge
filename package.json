@@ -35,7 +35,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/CurrenWong/herdr-dingtalk-omo-bridge.git"
+    "url": "git+https://github.com/CurrenWong/herdr-dingtalk-omo-bridge.git"
   },
   "bugs": {
     "url": "https://github.com/CurrenWong/herdr-dingtalk-omo-bridge/issues"
