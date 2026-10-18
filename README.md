@@ -102,7 +102,7 @@ second Stream connection when one is already live.
 
 | | |
 |---|---|
-| Herdr | ≥ 0.9.0 (developed against 0.9.3) |
+| Herdr | ≥ 0.9.3 (the version this was built and verified against) |
 | OS | **Verified on Windows 11.** See [Platform support](#platform-support). |
 | Node | ≥ 20 (developed against 24) |
 | OmO | the `omo` CLI on `PATH` |
@@ -311,12 +311,28 @@ was rejected.
 
 ## Operations
 
+### Plugin actions
+
+Two one-shot actions ship with the plugin. List them with
+`herdr plugin action list --plugin dingtalk-omo-bridge`.
+
+| Action | What it does |
+|---|---|
+| `dingtalk-omo-bridge.auth` | DingTalk device-flow registration. Prints a scan URL and blocks until you scan it, then writes the credentials to the plugin config dir. Walked through in [Install](#install). |
+| `dingtalk-omo-bridge.probe` | Prints the environment Herdr injects into the plugin (paths, ids, socket) and the result of a few CLI calls. Use it when something is behaving as if an env var were missing. |
+
+```bash
+herdr plugin action invoke dingtalk-omo-bridge.probe
+```
+
+### Logs
+
 Logs live in the plugin state directory
 (`%LOCALAPPDATA%\herdr\plugins\<id>\` on Windows):
 
 | File | Contents |
 |---|---|
-| `dingtalk-bridge.log` | every inbound, every tag call, every webhook push |
+| `dingtalk-bridge.log` | every inbound (with its classified verdict), every tag call, every webhook push |
 | `supervise.log` | bridge restarts and their backoff |
 | `dingtalk-bridge.json` | live state: pid, connection, counts, last push |
 
@@ -324,7 +340,7 @@ Useful commands:
 
 ```bash
 herdr pane list                                   # are both panes up?
-herdr pane read w2:pK --source recent-unwrapped --lines 40
+herdr pane read <pane-id> --source recent-unwrapped --lines 40
 herdr agent list                                  # is the agent named "dingtalk"?
 herdr plugin log list --plugin dingtalk-omo-bridge
 ```
@@ -355,6 +371,8 @@ node startup.mjs     # with the HERDR_* plugin env vars set
 | Bridge never connects | Another Stream client is already using this app. DingTalk permits exactly one connection per app — check for a second `dingtalk-bridge.mjs`. |
 | Tags never appear | Run `node probe-emotion.mjs <conv-id>`, and confirm the app has the robot capability that allows emotions. |
 | `msg.dec.err` on every tag | The message id was not accepted. Usually a stale or non-robot message. |
+| Reply says "只支持文本消息" / "Text messages only" | Working as intended — the bridge handles text, and OmO cannot receive images or files through the pane. |
+| `check-reply.mjs` prints "no OmO sessions directory" | OmO is not installed, or has never run on this machine. The bridge reads answers from OmO's session logs, so there is nothing to read yet. |
 
 ## Security notes
 
@@ -410,6 +428,11 @@ If you get it running elsewhere, widening the manifest to
   conversation; concurrent senders queue rather than run in parallel.
 - **Tied to OmO's session-log format.** Another agent would need its own
   reply-extraction adapter (`sessionFileForCwd` / `lastAssistantText`).
+- **Text messages only.** Images and files cannot be handed to OmO through the
+  pane, so the bridge replies saying so rather than going quiet. Support would
+  mean downloading the media and writing it into the agent's working directory.
+- **One turn at a time.** A message that arrives mid-turn gets "still working on
+  the previous one" instead of queueing.
 - **No allowlist by default**, which on a shared bot is a real exposure. See
   [Security notes](#security-notes).
 
@@ -442,6 +465,10 @@ If you get it running elsewhere, widening the manifest to
 
 **标签是独立的 REST 调用**，需要 app accessToken（Stream 长连接本身拿不到），
 所以任何失败都只记日志、绝不吞掉正文回复。`LAB_EMOTIONS=0` 可整体关闭。
+
+**只支持文本消息**。图片和文件没法通过 pane 交给 OmO，所以桥会明确回一句
+「只支持文本消息」，而不是静默不理——静默跟机器人挂了是分不清的。同一时间
+只处理一轮，中途再发会收到「上一条还在处理中」。
 
 **⚠️ 默认没有白名单。** `DINGTALK_ALLOW_STAFF` 不设的话，任何能给这个机器人
 发消息的人都能驱动你本机的 OmO 读写文件、跑命令。正式用请务必设置。

@@ -20,6 +20,7 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statS
 import { homedir } from "node:os";
 import { join, resolve as resolvePath } from "node:path";
 import { DWClient, TOPIC_ROBOT } from "dingtalk-stream";
+import { ACTIONS, classifyInbound } from "./inbound.mjs";
 import { DEFAULT_PLUGIN_ID, defaultConfigDir, defaultStateDir } from "./herdr-paths.mjs";
 
 const HERDR = process.env.HERDR_BIN_PATH ?? "herdr";
@@ -49,6 +50,7 @@ const TEXT = {
     noAgent: (name) => `找不到 Herdr agent「${name}」，桥不知道该把消息投到哪里。`,
     busy: "上一条还在处理中，稍等。",
     handleFailed: (msg) => `桥接出错：${msg}`,
+    unsupported: (type) => `只支持文本消息，收到的是 ${type}。图片和文件没法交给 OmO。`,
   },
   en: {
     fallbackTitle: "Reply",
@@ -58,6 +60,7 @@ const TEXT = {
     noAgent: (name) => `Herdr agent "${name}" not found — the bridge has nowhere to send this.`,
     busy: "Still working on the previous message.",
     handleFailed: (msg) => `Bridge error: ${msg}`,
+    unsupported: (type) => `Text messages only — this one was "${type}". Images and files cannot be handed to OmO.`,
   },
 };
 const t = (key, ...args) => TEXT[LANG][key](...args);
@@ -379,19 +382,32 @@ async function askAgent(paneId, text, cwd) {
 async function handle(msg) {
   state.seen += 1;
   state.last_webhook = msg.sessionWebhook;
-  const content = String(msg.text?.content ?? "").trim();
   const who = `${msg.senderNick ?? "?"} (${msg.senderStaffId ?? "?"})`;
   // DingTalk names it msgId; the aliases are just belt-and-braces in case the
   // payload shape ever differs.
   const msgId = msg.msgId ?? msg.messageId ?? msg.message_id ?? "";
   const convId = msg.conversationId ?? "";
-  log("inbound", JSON.stringify({ from: who, conv: convId, msgId, text: content }));
+
+  const verdict = classifyInbound(msg, { allow: ALLOW });
+  log(
+    "inbound",
+    JSON.stringify({ from: who, conv: convId, msgId, msgtype: verdict.msgtype, text: verdict.text, verdict: verdict.action }),
+  );
   log("inbound keys", JSON.stringify(Object.keys(msg)));
 
-  if (!content) return;
-  if (ALLOW.length && !ALLOW.includes(msg.senderStaffId)) {
-    log("!! rejected sender", msg.senderStaffId);
-    await push(msg.sessionWebhook, t("unauthorized", msg.senderStaffId));
+  if (verdict.action === ACTIONS.REJECT) {
+    log("!! rejected sender", verdict.staffId);
+    await push(msg.sessionWebhook, t("unauthorized", verdict.staffId));
+    return;
+  }
+
+  // Answer unsupported types instead of going silent. Silence is
+  // indistinguishable from the bot being down, and the bridge used to do
+  // exactly that for images and files.
+  if (verdict.action === ACTIONS.UNSUPPORTED) {
+    log("!! unsupported message", JSON.stringify({ msgtype: verdict.msgtype, msgId }));
+    await tag(msgId, convId, TAG_ERROR);
+    await push(msg.sessionWebhook, t("unsupported", verdict.msgtype));
     return;
   }
 
@@ -413,7 +429,7 @@ async function handle(msg) {
   }
   log("-> agent", JSON.stringify({ agent: AGENT, pane: paneId, cwd: info?.cwd, status: info?.agent_status }));
 
-  const answer = await askAgent(paneId, content, info?.cwd);
+  const answer = await askAgent(paneId, verdict.text, info?.cwd);
   await push(msg.sessionWebhook, answer.text.slice(0, 4000));
   await finish(answer.ok);
 }

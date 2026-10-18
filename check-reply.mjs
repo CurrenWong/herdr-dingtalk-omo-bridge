@@ -10,6 +10,16 @@ const CWD = process.argv[3] ?? process.cwd();
 const fromByte = Number(process.argv[2] ?? 0);
 
 function sessionFileForCwd(cwd) {
+  // OmO may not be installed, or may never have run in this directory. Say so
+  // plainly: this is the diagnostic a user reaches for precisely when things
+  // are already confusing, and a raw ENOENT stack helps nobody.
+  if (!existsSync(OMO_SESSIONS)) {
+    console.log(`no OmO sessions directory at ${OMO_SESSIONS}`);
+    console.log("  -> OmO (omo-ai) is probably not installed, or has not run yet.");
+    console.log("  -> The bridge reads its answers from these files, so there is nothing to check.");
+    process.exit(2);
+  }
+
   const want = resolvePath(cwd).toLowerCase();
   let best = null;
   for (const dir of readdirSync(OMO_SESSIONS, { withFileTypes: true })) {
@@ -51,7 +61,16 @@ function lastAssistantText(file, from) {
 }
 
 const f = sessionFileForCwd(CWD);
-console.log("session:", f?.path, "size", f?.size);
+if (!f) {
+  console.log(`no OmO session found for cwd: ${CWD}`);
+  console.log(`  searched: ${OMO_SESSIONS}`);
+  console.log("  -> OmO keys its sessions by working directory. Either it has never");
+  console.log("     run in this directory, or you are checking the wrong one.");
+  console.log(`  -> pass a directory explicitly: node check-reply.mjs 0 "<cwd>"`);
+  process.exit(2);
+}
+
+console.log("session:", f.path, "size", f.size);
 const answer = lastAssistantText(f, fromByte);
 console.log("--- answer ---");
 console.log(answer ?? "(none)");
