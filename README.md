@@ -39,9 +39,29 @@ when Herdr restarts, and leaves you a TUI you can watch while it works.
 - [Troubleshooting](#troubleshooting)
 - [Security notes](#security-notes)
 - [Known limitations](#known-limitations)
+- [Publishing](#publishing)
 - [中文说明](#中文说明)
 
 ---
+
+## Publishing
+
+Two channels, both driven by manual GitHub Actions workflows:
+
+| Workflow | Registry | Package name |
+|---|---|---|
+| `publish.yml` | npmjs.org | `herdr-dingtalk-omo-bridge` |
+| `publish-github-packages.yml` | npm.pkg.github.com | `@currenwong/herdr-dingtalk-omo-bridge` |
+
+The npmjs one stages the tarball and then waits for a 2FA approval, because this
+account has 2FA and npm no longer accepts tokens that bypass it. The GitHub
+Packages one authenticates with the job's own `GITHUB_TOKEN`, so it needs no
+secret — the workflow rewrites the package name in the runner, since GitHub
+namespaces everything under the account and the npmjs package is unscoped.
+
+Bump `version` in `package.json` and tag the commit before releasing. A release,
+an npm version and a git tag that disagree about what `vX.Y.Z` means is the
+kind of thing that is only noticed months later.
 
 ## Contributing
 
@@ -200,6 +220,12 @@ Either way, confirm it landed:
 ```bash
 herdr plugin list        # expect: dingtalk-omo-bridge (DingTalk ↔ OmO Bridge) enabled
 ```
+
+> **Which registry?** Install from npmjs (`npx herdr-dingtalk-omo-bridge@latest`)
+> or straight from this repo. A copy is also mirrored to GitHub Packages as
+> `@currenwong/herdr-dingtalk-omo-bridge` so it shows under the repository's
+> Packages panel, but that one needs a GitHub token to install, so it is not the
+> recommended path. See [Publishing](#publishing) if you fork this.
 
 ### 3. Register the bot
 

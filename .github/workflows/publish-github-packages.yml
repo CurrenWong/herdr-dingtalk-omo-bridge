@@ -1,0 +1,51 @@
+name: Publish to GitHub Packages
+
+# Publishes the same payload to GitHub's own registry (npm.pkg.github.com) so the
+# package appears under the repository's Packages panel.
+#
+# This is a mirror, not the main channel — npmjs.org carries the unscoped
+# `herdr-dingtalk-omo-bridge`, which is what `npx` and `herdr plugin install`
+# resolve. GitHub Packages namespaces everything under the account, so the same
+# files have to go out as `@currenwong/herdr-dingtalk-omo-bridge`.
+#
+# Auth is the workflow's own GITHUB_TOKEN, so there is no PAT to create, store or
+# rotate. That matters because fine-grained PATs still do not properly support
+# the packages scopes, which is the usual trap here.
+on:
+  workflow_dispatch:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          registry-url: "https://npm.pkg.github.com"
+          scope: "@currenwong"
+
+      # Before the rename: npm ci compares package.json against the lockfile,
+      # and renaming first leaves the two disagreeing.
+      - name: Install
+        run: npm ci
+
+      - name: Scope the name for GitHub Packages
+        run: |
+          npm pkg set name="@currenwong/herdr-dingtalk-omo-bridge"
+          npm pkg set publishConfig.registry="https://npm.pkg.github.com"
+          node -p "'publishing as: ' + require('./package.json').name + '@' + require('./package.json').version"
+
+      - name: Publish
+        # --registry is passed explicitly: the committed .npmrc pins
+        # registry.npmjs.org, and without this the publish would aim there.
+        run: npm publish --registry=https://npm.pkg.github.com
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
