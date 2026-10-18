@@ -68,10 +68,42 @@ for (const r of required) {
 }
 console.log(`pane entrypoints:   ${entrypoints.join(", ") || "(none)"}`);
 
+// package-lock.json must agree with package.json. The install runs
+// `npm ci --omit=dev`, and a lockfile left behind by a rename makes it unclear
+// whether that will succeed at install time — which is not a thing you want to
+// discover on someone else's machine.
+const pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
+const lock = JSON.parse(readFileSync(join(root, "package-lock.json"), "utf8"));
+const lockRoot = lock.packages?.[""] ?? {};
+
+console.log(`package.json:       ${pkg.name}@${pkg.version}`);
+console.log(`package-lock.json:  ${lock.name}@${lock.version}`);
+
+if (lock.name !== pkg.name) {
+  problems.push(`package-lock.json name "${lock.name}" != package.json name "${pkg.name}" — run: npm install --package-lock-only`);
+}
+if (lock.version !== pkg.version) {
+  problems.push(`package-lock.json version "${lock.version}" != package.json version "${pkg.version}" — run: npm install --package-lock-only`);
+}
+if (lockRoot.name && lockRoot.name !== pkg.name) {
+  problems.push(`package-lock.json root package name "${lockRoot.name}" is stale`);
+}
+
+// The manifest's build step must match what CI verifies, or CI is testing a
+// different install path than users get.
+const buildCmd = manifest.match(/^\[\[build\]\][\s\S]*?^command\s*=\s*\[([^\]]*)\]/m);
+const buildParts = buildCmd
+  ? buildCmd[1].split(",").map((s) => s.trim().replace(/"/g, "")).filter(Boolean)
+  : [];
+console.log(`build command:      ${buildParts.join(" ") || "(none)"}`);
+if (!buildParts.join(" ").includes("npm ci")) {
+  problems.push("manifest [[build]] should run `npm ci --omit=dev`, matching CI");
+}
+
 console.log("");
 if (problems.length) {
   console.error("FAIL:");
   for (const p of problems) console.error(`  ${p}`);
   process.exit(1);
 }
-console.log("PASS — manifest is consistent with the code defaults");
+console.log("PASS — manifest, package metadata and lockfile are consistent");
