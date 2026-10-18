@@ -380,12 +380,51 @@ what the docs claim:
 
 | | Commands | What the bridge does |
 |---|---|---|
-| Verified inline | `/session` `/hotkeys` `/changelog` `/reload` `/compact [instructions]` | Runs it, reads the new lines off the screen, replies with them. `/compact` gets a settle-based wait instead of the short poll, since it makes a model call |
+| Verified inline | `/session` `/hotkeys` `/changelog` `/reload` `/compact [instructions]` `/new` | Runs it, reads the new lines off the screen, replies with them. `/compact` gets a settle-based wait instead of the short poll, since it makes a model call |
+| Answered by the bridge | `/abort`, `/status` | Neither exists in OmO's command table, so nothing is shadowed. See below |
 | Driven picker | `/model`, `/model <term>`, `/sessions`, `/sessions <term>` | See below |
 | Refused — overlay | `/help` (measured: full-screen help), plus `/settings` `/tree` `/fork` `/clone` `/scoped-models` `/keybindings` `/llama` `/copy` `/export` | Refused. A picker left open swallows every following message into its filter |
-| Refused — untested | `/thinking` `/reasoning` `/efforts` `/fast` `/compact` `/new` `/rename` | Refused until someone watches what they actually do |
+| Refused — untested | `/thinking` `/reasoning` `/efforts` `/fast` `/rename` | Refused until someone watches what they actually do |
 | Refused — destructive | `/quit` `/exit` `/login` `/logout` `/import` `/trust` | Refused. These close the agent or touch credentials and files |
 | Passed through | `/skill:name`, prompt templates, extension commands | Sent as an ordinary prompt — those *do* reach the model |
+
+**`/abort` and `/status` are the bridge's own commands.** Neither name appears in
+OmO's command table, so nothing is shadowed, and neither has a TUI equivalent to
+forward to. `/abort` sends Esc — what the TUI itself uses to interrupt a turn —
+clears the queue, and bumps an abort epoch. The epoch is not bookkeeping: an
+interrupted turn never produces a final assistant message, so without it the
+answer loop would sit there until the five-minute timeout and every message
+behind it would wait too. `/status` answers from what the bridge already knows:
+uptime, which pane the agent resolved to, its `agent_status`, the working
+directory, the session file being read, queue depth, and when the last message
+arrived.
+
+**Messages that arrive mid-turn queue instead of vanishing.** The old answer was
+`稍等` and the text was dropped, which is the wrong trade on a phone — a follow-up
+thought is exactly what gets lost. Up to `LAB_QUEUE_LIMIT` (default 3) are kept
+and run in order; a full queue says so rather than silently discarding. The two
+urgent commands jump the queue, since waiting behind a turn to stop that turn is
+useless.
+
+**While busy, the two commands that must not wait are recognised before queuing**,
+which is also why they are matched against the trimmed text at the call site: in
+the TUI `" /foo"` is a prompt, not a command.
+
+**When the agent is blocked, the question is sent along with the notice.** "Go and
+look in Herdr" does not tell someone holding a phone whether the pending question
+is worth interrupting anything for — and when the tool behind it is destructive,
+that difference is a safety problem. The visible frame is excerpted instead
+(status bar and footer stripped, capped at 700 characters), so an approval request
+arrives as the question, the command, and the options.
+
+**A dead agent pane is started again.** If no agent resolves, the bridge runs
+`pane run <pane> omo` and waits for the editor prompt, with a cooldown so a pane
+that keeps dying does not become a restart loop. `herdr agent start --kind pi`
+cannot be used: this machine has `omo` and no `pi`.
+
+**`/new` was measured before it was allowed.** It prints `✓ New session started`
+inline, asks for no confirmation, opens no overlay, and resets the context
+counter to `0/1M` immediately.
 
 **`/model` is not a switch command.** Documented as one; measured otherwise:
 `/model anything` opens the picker and types the argument into its filter. So the
@@ -644,12 +683,37 @@ If you get it running elsewhere, widening the manifest to
 
 | | 命令 | 桥的做法 |
 |---|---|---|
-| 实测可跑 | `/session` `/hotkeys` `/changelog` `/reload` `/compact [摘要要求]` | 发过去，把屏幕新增内容读回来。`/compact` 要调一次模型，所以用「等屏幕稳定」的等法而不是短轮询 |
+| 实测可跑 | `/session` `/hotkeys` `/changelog` `/reload` `/compact [摘要要求]` `/new` | 发过去，把屏幕新增内容读回来。`/compact` 要调一次模型，所以用「等屏幕稳定」的等法而不是短轮询 |
+| 桥自己回答 | `/abort`、`/status` | 两个名字都不在 OmO 的命令表里，不会撞名。见下 |
 | 驱动选择器 | `/model`、`/model <关键词>`、`/sessions`、`/sessions <关键词>` | 见下 |
 | 拒绝·会弹框 | `/help`（实测是全屏帮助），以及 `/settings` `/tree` `/fork` `/clone` `/scoped-models` `/keybindings` `/llama` `/copy` `/export` | 拒绝。留着选择器，之后每条消息都会被输入进它的搜索框 |
-| 拒绝·未验证 | `/thinking` `/reasoning` `/efforts` `/fast` `/compact` `/new` `/rename` | 在有人看过它真实行为之前一律拒绝 |
+| 拒绝·未验证 | `/thinking` `/reasoning` `/efforts` `/fast` `/rename` | 在有人看过它真实行为之前一律拒绝 |
 | 拒绝·危险 | `/quit` `/exit` `/login` `/logout` `/import` `/trust` | 拒绝。会关掉 agent，或动到凭据和文件 |
 | 放行 | `/skill:name`、prompt 模板、扩展注册的命令 | 当普通提示词发过去——这些**确实**会到模型 |
+
+**`/abort` 和 `/status` 是桥自己的命令。** 两个名字都不在 OmO 的命令表里，不会撞名，
+而且在 TUI 里也没有可转发的东西。`/abort` 发 Esc（TUI 自己就是这么打断的）、清空队列、
+再抬一次 abort epoch。epoch 不是记账：被打断的一轮不会产出最终回复，没有它，等答案的
+循环会一直坐到五分钟超时，后面排队的消息全都跟着等。`/status` 只答桥已经知道的事：
+运行多久、agent 落在哪个 pane、`agent_status`、工作目录、正在读的会话文件、队列深度、
+上一条消息什么时候到的。
+
+**跑到一半收到的消息会排队，而不是消失。** 以前是回一句「稍等」然后把正文丢掉，这在
+手机上是笔亏的买卖——补一句「顺便看第 3 页」正是最容易丢的东西。默认最多留
+`LAB_QUEUE_LIMIT`（3）条并按序执行；队列满了会明说，不会悄悄吞掉。两个紧急命令可以
+插队，因为排在某一轮后面去中止那一轮，没有任何意义。
+
+**被 blocked 时，把「它在问什么」一起发过来。** 「去 Herdr 里看一眼」没法让拿着手机的
+人判断这个待确认值不值得打断手上的事；当背后那个工具是危险命令时，这个差别是安全问题。
+所以截的是可见屏里的对话框本体（去掉状态栏和页脚，上限 700 字符），一条审批请求发过来
+就是问题、命令、选项。
+
+**agent pane 死了会被拉起来。** 解析不到 agent 时走 `pane run <pane> omo`，等到编辑器
+提示符出现为止，带冷却，免得一个反复挂掉的 pane 变成重启循环。不能用
+`herdr agent start --kind pi`：这台机器上只有 `omo`，没有 `pi`。
+
+**`/new` 是先实测再放行的。** 它内联打印 `✓ New session started`，不要确认、不留弹框，
+上下文计数器立刻从 `32K/1M` 回到 `0/1M`。
 
 **`/model` 不是切换命令。** 文档说是，实测不是：`/model 任何东西` 都是打开选择器并把
 参数当成过滤词。所以桥改成显式驱动——打开、用关键词收窄、**只有剩下一行时**才按回车，

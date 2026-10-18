@@ -25,8 +25,10 @@ import { ACTIONS, classifyInbound } from "./inbound.mjs";
 import { assistantMessagesSince, lastAssistantText } from "./session-log.mjs";
 import { CHOICE_TTL_MS, agentChoices, parseChoice, selectAgent } from "./agent-target.mjs";
 import {
+  BRIDGE_URGENT,
   SLASH,
   classifySlash,
+  describeBlocked,
   parseCompactOutcome,
   parsePickerRows,
   parseSessionReport,
@@ -63,6 +65,10 @@ const PROGRESS_LIMIT = Number(process.env.LAB_PROGRESS_LIMIT ?? 10);
 // `herdr agent prompt` uses five seconds for the same gate.
 const SUBMIT_STALL_MS = Number(process.env.LAB_SUBMIT_STALL_MS ?? 8000);
 
+// Messages accepted while a turn is running. Bounded so a stuck agent cannot turn
+// into an unbounded backlog that fires long after the user stopped caring.
+const MAX_QUEUE = Number(process.env.LAB_QUEUE_LIMIT ?? 3);
+
 // Every string the bot says to the user lives here so the plugin is not welded
 // to one language. Set LAB_LANG=en for English; anything else falls back to the
 // Chinese original.
@@ -70,7 +76,7 @@ const LANG = (process.env.LAB_LANG ?? "zh").toLowerCase().startsWith("en") ? "en
 const TEXT = {
   zh: {
     fallbackTitle: "回复",
-    blocked: "⚠️ OmO 卡在一个需要确认的界面上（blocked），请在 Herdr 里看一眼。",
+    blocked: "⚠️ OmO 卡在一个需要确认的界面上（blocked）。",
     stalled: "⚠️ 消息已经发出去了，但 OmO 没有开始工作（8 秒内没进入 working）。可能刚被什么界面挡住了，去 Herdr 里看一眼。",
     timeout: (s) => `⏱ OmO 在 ${s} 秒内没有给出回答。`,
     unauthorized: (id) => `未授权的发送者：${id}`,
@@ -139,6 +145,19 @@ const TEXT = {
     compactNotice: "⏳ /compact 在跑，要调一次模型做摘要，可能要一分钟…",
     compactFailed: (reason) => `压缩没成功：${reason}`,
     busy: "上一条还在处理中，稍等。",
+    queued: (n) => `📥 已排队，前面还有 ${n - 1} 条，处理完就轮到。`,
+    queueFull: (max) => `📥 队列满了（最多 ${max} 条），这条没接上——等它处理完请重发。`,
+    aborted: (dropped) => `🛑 已打断。${dropped ? `顺带丢掉了队列里的 ${dropped} 条。` : ""}`,
+    notAborting: "🛑 现在没有在跑的任务。",
+    status: (s) =>
+      [
+        `🟢 桥已连上，运行 ${Math.round(s.uptime / 60)} 分钟`,
+        `OmO：${s.agent}${s.pane ? ` @ ${s.pane}` : ""} — ${s.status}`,
+        `目录：${s.cwd}`,
+        `会话文件：${s.session}`,
+        s.queue ? `队列：${s.queue} 条` : "队列：空",
+        `上一条消息：${s.last}`,
+      ].join("\n"),
     handleFailed: (msg) => `桥接出错：${msg}`,
     unsupported: (type) => `只支持文本消息，收到的是 ${type}。图片和文件没法交给 OmO。`,
     attachmentPrompt: ({ type, path, size }) =>
@@ -149,7 +168,7 @@ const TEXT = {
   },
   en: {
     fallbackTitle: "Reply",
-    blocked: "⚠️ OmO is blocked on a confirmation prompt — take a look in Herdr.",
+    blocked: "⚠️ OmO is blocked on a confirmation prompt.",
     stalled: "⚠️ The message went out, but OmO never started working (no `working` within 8s). Something may have been in the way — take a look in Herdr.",
     timeout: (s) => `⏱ OmO did not answer within ${s}s.`,
     unauthorized: (id) => `Unauthorized sender: ${id}`,
@@ -215,6 +234,19 @@ const TEXT = {
     compactNotice: "⏳ /compact is running — it makes a model call to summarise, so this takes a minute or so…",
     compactFailed: (reason) => `Compaction did not run: ${reason}`,
     busy: "Still working on the previous message.",
+    queued: (n) => `📥 Queued — ${n - 1} ahead of it, it runs when those finish.`,
+    queueFull: (max) => `📥 The queue is full (${max} max), so this one was not taken. Send it again once things settle.`,
+    aborted: (dropped) => `🛑 Interrupted.${dropped ? ` Also dropped ${dropped} queued message(s).` : ""}`,
+    notAborting: "🛑 Nothing is running.",
+    status: (s) =>
+      [
+        `🟢 Bridge connected, up ${Math.round(s.uptime / 60)} min`,
+        `OmO: ${s.agent}${s.pane ? ` @ ${s.pane}` : ""} — ${s.status}`,
+        `Directory: ${s.cwd}`,
+        `Session file: ${s.session}`,
+        s.queue ? `Queue: ${s.queue} message(s)` : "Queue: empty",
+        `Last message: ${s.last}`,
+      ].join("\n"),
     handleFailed: (msg) => `Bridge error: ${msg}`,
     unsupported: (type) => `Text messages only — this one was "${type}". Images and files cannot be handed to OmO.`,
     attachmentPrompt: ({ type, path, size }) =>
@@ -627,6 +659,62 @@ const readScreen = (paneId) =>
 // The editor prompt is the reliable sign that no overlay is covering the frame.
 const atEditor = (screen) => screen.split("\n").some((l) => l.trim() === "❯");
 
+// The pane that most recently answered for the configured agent. There is no other
+// way to find it: Herdr's registry forgets a dead agent, and the name it had is the
+// only handle left.
+let lastPaneId = "";
+
+// Restarting is opt-out rather than opt-in, because the failure it covers is the
+// one a phone user cannot fix: nothing is listening, and the pane is still there.
+// The cooldown stops a crash loop from becoming a spawn loop.
+const RESTART_ENABLED = process.env.LAB_RESTART_AGENT !== "0";
+const RESTART_COOLDOWN_MS = Number(process.env.LAB_RESTART_COOLDOWN_MS ?? 30000);
+let lastRestartAt = 0;
+
+/**
+ * Bring OmO back up in a pane whose agent process is gone.
+ *
+ * `herdr agent start --kind pi` cannot do this: it launches a binary named `pi`,
+ * and this machine has `omo`. So the pane's own shell is used, which is also how
+ * the agent was started in the first place.
+ */
+async function tryRestartAgent(paneId) {
+  if (!RESTART_ENABLED || !paneId) return false;
+  if (Date.now() - lastRestartAt < RESTART_COOLDOWN_MS) {
+    log("restart skipped, cooling down", JSON.stringify({ pane: paneId }));
+    return false;
+  }
+
+  lastRestartAt = Date.now();
+  log("restarting agent", JSON.stringify({ pane: paneId }));
+  try {
+    herdr(["pane", "run", paneId, "omo"]);
+  } catch (err) {
+    log("!! restart command failed", err.message);
+    return false;
+  }
+
+  // Cold start loads extensions and MCP servers, which takes tens of seconds.
+  for (let i = 0; i < 30; i += 1) {
+    await sleep(2000);
+    if (agentInfo()?.pane_id === paneId) {
+      log("agent restarted", JSON.stringify({ pane: paneId, waited: (i + 1) * 2 }));
+      return true;
+    }
+  }
+
+  log("!! restart did not come up", JSON.stringify({ pane: paneId }));
+  return false;
+}
+
+// What the agent is blocked on, not merely that it is blocked. "Go and look in
+// Herdr" is not actionable from a phone, and when the pending question is an
+// approval for a destructive tool call the question is the whole point.
+function blockedNotice(paneId) {
+  const detail = describeBlocked(readScreen(paneId));
+  return detail ? `${t("blocked")}\n\n${detail}` : t("blocked");
+}
+
 async function openModelPicker(paneId) {
   herdr(["pane", "send-text", paneId, "/model"]);
   await sleep(300);
@@ -768,7 +856,35 @@ async function driveModelPicker(paneId, term) {
 }
 
 let busy = false;
-const state = { started_at: new Date().toISOString(), seen: 0, last_push: null };
+let pumping = false;
+let abortEpoch = 0;
+const queue = [];
+
+// Drain the queue one message at a time. `pumping` is what keeps a second
+// dispatcher from starting a parallel loop the moment the first message lands.
+async function pump() {
+  if (pumping) return;
+  pumping = true;
+  try {
+    while (queue.length) {
+      const next = queue.shift();
+      busy = true;
+      try {
+        await handle(next);
+      } catch (err) {
+        log("!! handle failed", err.message);
+        await push(next.sessionWebhook, t("handleFailed", err.message));
+        await tag(next.msgId ?? next.messageId ?? next.message_id ?? "", next.conversationId ?? "", TAG_ERROR);
+      } finally {
+        busy = false;
+      }
+    }
+  } finally {
+    pumping = false;
+  }
+}
+
+const state = { started_at: new Date().toISOString(), seen: 0, last_push: null, last_inbound_at: null };
 
 // Returns {text, ok} so the caller knows whether to tag the turn Done or
 // Error — a timeout or a blocked prompt is not a successful answer.
@@ -794,7 +910,7 @@ async function askAgent(paneId, text, cwd, onProgress) {
     // Typing now would land in whichever field the dialog has focused, and the
     // message would be silently lost rather than delivered.
     log("!! not submitting, agent is blocked", JSON.stringify({ status: before.agent_status }));
-    return { text: t("blocked"), ok: false };
+    return { text: blockedNotice(paneId), ok: false };
   }
 
   // A literal newline in send-text would submit a half prompt, so flatten.
@@ -829,6 +945,11 @@ async function askAgent(paneId, text, cwd, onProgress) {
   let sawWorking = before?.agent_status === "working";
 
   const deadline = Date.now() + ANSWER_TIMEOUT_MS;
+  // Bumped by `/abort`. Without this the loop would sit here until the answer
+  // timeout: Esc stops the agent, but an interrupted turn never produces a final
+  // assistant message, so there is nothing to wake it up and the queue behind it
+  // would stall for five minutes.
+  const myAbortEpoch = abortEpoch;
   // Narration is deduped by byte offset so a row seen on two polls is not sent
   // twice. Capped because DingTalk rate-limits a robot to ~20 messages/minute.
   const narrated = new Set();
@@ -869,9 +990,13 @@ async function askAgent(paneId, text, cwd, onProgress) {
     }
     if (info?.agent_status === "blocked") {
       return {
-        text: t("blocked"),
+        text: blockedNotice(paneId),
         ok: false,
       };
+    }
+    if (abortEpoch !== myAbortEpoch) {
+      log("turn interrupted by /abort");
+      return { text: "", ok: false };
     }
   }
   log("!! timeout after", ANSWER_TIMEOUT_MS, "ms (sawWorking=" + sawWorking + ")");
@@ -883,6 +1008,7 @@ async function askAgent(paneId, text, cwd, onProgress) {
 
 async function handle(msg) {
   state.seen += 1;
+  state.last_inbound_at = new Date().toISOString();
   state.last_webhook = msg.sessionWebhook;
   const who = `${msg.senderNick ?? "?"} (${msg.senderStaffId ?? "?"})`;
   // DingTalk names it msgId; the aliases are just belt-and-braces in case the
@@ -963,13 +1089,22 @@ async function handle(msg) {
     pendingChoice = null;
   }
 
-  const info = agentInfo();
-  const paneId = info?.pane_id ?? agentPaneId();
+  let info = agentInfo();
+  let paneId = info?.pane_id ?? agentPaneId();
+  if (!paneId) {
+    // The pane that last answered is the one worth reviving: OmO is started in it
+    // by hand, so when it dies the pane is still there sitting at a shell prompt.
+    if (await tryRestartAgent(lastPaneId)) {
+      info = agentInfo();
+      paneId = info?.pane_id ?? lastPaneId;
+    }
+  }
   if (!paneId) {
     const asked = await explainNoAgent(msg, lastMiss);
     await finish(asked);
     return;
   }
+  lastPaneId = paneId;
 
   // Slash commands are handled by the TUI, not the model: they write nothing to
   // the session log, and some of them leave a picker open that would swallow
@@ -981,6 +1116,46 @@ async function handle(msg) {
     if (slash.kind === SLASH.DANGEROUS) {
       await push(msg.sessionWebhook, t("slashDangerous", slash.command));
       await finish(false);
+      return;
+    }
+
+    if (slash.kind === SLASH.BRIDGE) {
+      if (slash.command === "abort") {
+        const wasBusy = busy;
+        const dropped = queue.length;
+        queue.length = 0;
+        // Bumping the epoch is what actually frees the turn: Esc stops the agent,
+        // but an interrupted turn never produces a final assistant message, so the
+        // wait loop would sit there until the answer timeout and the queue behind
+        // it would stall for five minutes.
+        abortEpoch += 1;
+        // Esc is what the TUI itself uses to interrupt a turn.
+        herdr(["pane", "send-keys", paneId, "escape"]);
+        await sleep(600);
+        const after = agentInfo();
+        log("abort", JSON.stringify({ wasBusy, dropped, status: after?.agent_status ?? "unknown" }));
+        await push(msg.sessionWebhook, wasBusy ? t("aborted", dropped) : t("notAborting"));
+        // The abort itself did what was asked, whether or not the agent noticed.
+        await finish(true);
+        return;
+      }
+
+      const info = agentInfo();
+      const session = sessionFileForCwd(info?.cwd ?? "");
+      await push(
+        msg.sessionWebhook,
+        t("status", {
+          uptime: Date.now() - Date.parse(state.started_at),
+          agent: AGENT,
+          pane: info?.pane_id ?? null,
+          status: info?.agent_status ?? "unresolved",
+          cwd: info?.cwd ?? "—",
+          session: session?.path ?? "—",
+          queue: queue.length,
+          last: state.last_inbound_at ? state.last_inbound_at.replace("T", " ").slice(0, 19) : "none yet",
+        }),
+      );
+      await finish(true);
       return;
     }
 
@@ -1065,11 +1240,15 @@ async function handle(msg) {
     // Marked so a running commentary is never mistaken for the result.
     await push(msg.sessionWebhook, t("progress", progress.slice(0, 800)));
   });
-  // Truncating silently would look like the agent stopped mid-sentence.
-  const body = answer.text.length > PUSH_LIMIT
-    ? `${answer.text.slice(0, PUSH_LIMIT)}\n\n${t("truncated", answer.text.length - PUSH_LIMIT)}`
-    : answer.text;
-  await push(msg.sessionWebhook, body);
+  // An interrupted turn has no answer to push — `/abort` already said so — and
+  // pushing an empty body would post a blank message.
+  if (answer.text) {
+    // Truncating silently would look like the agent stopped mid-sentence.
+    const body = answer.text.length > PUSH_LIMIT
+      ? `${answer.text.slice(0, PUSH_LIMIT)}\n\n${t("truncated", answer.text.length - PUSH_LIMIT)}`
+      : answer.text;
+    await push(msg.sessionWebhook, body);
+  }
   await finish(answer.ok);
 }
 
@@ -1108,21 +1287,44 @@ client.registerCallbackListener(TOPIC_ROBOT, (res) => {
   void (async () => {
     const msgId = msg.msgId ?? msg.messageId ?? msg.message_id ?? "";
     const convId = msg.conversationId ?? "";
-    if (busy) {
-      await push(msg.sessionWebhook, t("busy"));
+
+    // `/abort` and `/status` skip the queue on purpose: the first exists to stop
+    // the turn that is filling the queue, and the second to explain why nothing
+    // is moving.
+    if (BRIDGE_URGENT.test(String(msg?.text?.content ?? "").trim())) {
+      busy = true;
+      try {
+        await handle(msg);
+      } catch (err) {
+        log("!! handle failed", err.message);
+        await push(msg.sessionWebhook, t("handleFailed", err.message));
+        await tag(msgId, convId, TAG_ERROR);
+      } finally {
+        busy = false;
+      }
+      return;
+    }
+
+    // Queued, not dropped.
+    //
+    // Refusing a message because the agent is busy was defensible when a turn took
+    // seconds. It is untenable now that one PDF can run for a minute and a half: a
+    // follow-up typed on a phone vanished, and the only feedback was "still
+    // working on the previous message" — the user had no way to know their words
+    // had never been sent.
+    if (queue.length >= MAX_QUEUE) {
+      log("queue full", JSON.stringify({ limit: MAX_QUEUE }));
+      await push(msg.sessionWebhook, t("queueFull", MAX_QUEUE));
       await tag(msgId, convId, TAG_ERROR);
       return;
     }
-    busy = true;
-    try {
-      await handle(msg);
-    } catch (err) {
-      log("!! handle failed", err.message);
-      await push(msg.sessionWebhook, t("handleFailed", err.message));
-      await tag(msgId, convId, TAG_ERROR);
-    } finally {
-      busy = false;
-    }
+
+    queue.push(msg);
+    await push(msg.sessionWebhook, t("queued", queue.length));
+    await tag(msgId, convId, TAG_RECEIVED);
+    log("queued", JSON.stringify({ depth: queue.length, msgId }));
+
+    void pump();
   })();
 });
 

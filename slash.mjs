@@ -25,14 +25,30 @@
 export const SLASH = {
   NONE: "none",
   SUPPORTED: "supported",
+  BRIDGE: "bridge",
   MODEL: "model",
   SESSIONS: "sessions",
   INTERACTIVE: "interactive",
   DANGEROUS: "dangerous",
 };
 
+/**
+ * Commands the bridge answers itself instead of typing at the agent.
+ *
+ * Neither name appears in OmO's command table, so nothing is shadowed. They exist
+ * because the two things a phone user most needs — stop what is running, and see
+ * what the bridge is doing — have no TUI equivalent to forward to.
+ */
+const BRIDGE = new Set(["abort", "status"]);
+
+// Commands that must not wait behind a running turn, or they would be exactly
+// useless: `/abort` to stop that turn, `/status` to find out why it will not stop.
+export const BRIDGE_URGENT = /^\/(abort|status)\b/i;
+
 // Verified: prints inline and returns to the editor.
-const SUPPORTED = new Set(["session", "hotkeys", "changelog", "reload"]);
+// `/new` measured: no confirmation and no overlay, it prints
+// `✓ New session started` and resets the context counter to 0/1M immediately.
+const SUPPORTED = new Set(["session", "hotkeys", "changelog", "reload", "new"]);
 
 /**
  * Verified inline, but too slow for the bridge's short wait.
@@ -96,6 +112,7 @@ export function classifySlash(text) {
   if (command.includes(":")) return { kind: SLASH.NONE, command, arg };
 
   if (DANGEROUS.has(command)) return { kind: SLASH.DANGEROUS, command, arg };
+  if (BRIDGE.has(command)) return { kind: SLASH.BRIDGE, command, arg };
   if (MODEL.has(command)) return { kind: SLASH.MODEL, command, arg };
   if (SESSIONS.has(command)) return { kind: SLASH.SESSIONS, command, arg };
   if (SUPPORTED.has(command) || SLOW.has(command)) {
@@ -281,6 +298,31 @@ export function parseSessionReport(text) {
   return report;
 }
 
+
+/**
+ * A short excerpt of whatever the agent is blocked on.
+ *
+ * "Go and look in Herdr" is useless to someone holding a phone: it does not say
+ * whether the pending question is worth interrupting anything for. When OmO stops
+ * on an approval, what matters is the question itself — especially when the tool
+ * behind it is destructive — so the visible frame is excerpted rather than
+ * summarised.
+ *
+ * The status bar carries `•` separators and the footer is parenthesised; neither
+ * is ever the question, and both would otherwise eat the excerpt.
+ */
+export function describeBlocked(screen, limit = 700) {
+  const lines = String(screen ?? "")
+    .replace(/\r/g, "")
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => l && !l.includes("•") && !/^[（(].*[)）]$/.test(l) && !l.startsWith("─"));
+
+  const picked = lines.slice(-14);
+  let out = picked.join("\n");
+  if (out.length > limit) out = `${out.slice(0, limit)}…`;
+  return out.trim();
+}
 
 /**
  * Rows of the `/resume` picker, as drawn:
