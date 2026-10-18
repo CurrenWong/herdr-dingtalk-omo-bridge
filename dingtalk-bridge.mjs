@@ -22,6 +22,7 @@ import { join, resolve as resolvePath } from "node:path";
 import { DWClient, TOPIC_ROBOT } from "dingtalk-stream";
 import { saveAttachment } from "./attachments.mjs";
 import { ACTIONS, classifyInbound } from "./inbound.mjs";
+import { lastAssistantText } from "./session-log.mjs";
 import { DEFAULT_PLUGIN_ID, defaultConfigDir, defaultStateDir } from "./herdr-paths.mjs";
 
 const HERDR = process.env.HERDR_BIN_PATH ?? "herdr";
@@ -167,27 +168,6 @@ function sessionFileForCwd(cwd) {
   return best;
 }
 
-function lastAssistantText(file, fromByte) {
-  if (!file || !existsSync(file.path)) return null;
-  const fd = readFileSync(file.path, "utf8");
-  const slice = fromByte > 0 && fromByte <= fd.length ? fd.slice(fromByte) : fd;
-  let answer = null;
-  for (const line of slice.split("\n")) {
-    if (!line.trim()) continue;
-    let row;
-    try {
-      row = JSON.parse(line);
-    } catch {
-      continue; // a partially written tail line; the next poll will see it whole
-    }
-    if (row.type !== "message" || row.message?.role !== "assistant") continue;
-    const parts = (row.message.content ?? [])
-      .filter((c) => c.type === "text" && c.text)
-      .map((c) => c.text.trim());
-    if (parts.length) answer = parts.join("\n\n");
-  }
-  return answer;
-}
 
 function stripAnsi(text) {
   return text

@@ -26,6 +26,7 @@
     "inbound.mjs",
     "probe.mjs",
     "probe-emotion.mjs",
+    "session-log.mjs",
     "startup.mjs",
     "supervise.mjs",
     "npm-shrinkwrap.json",
@@ -47,7 +48,7 @@
     "node": ">=20"
   },
   "scripts": {
-    "check": "node --check auth.mjs && node --check attachments.mjs && node --check check-reply.mjs && node --check dingtalk-bridge.mjs && node --check herdr-paths.mjs && node --check inbound.mjs && node --check installer.mjs && node --check bin/herdr-dingtalk-omo-bridge.mjs && node --check probe.mjs && node --check probe-emotion.mjs && node --check startup.mjs && node --check supervise.mjs",
+    "check": "node --check auth.mjs && node --check attachments.mjs && node --check check-reply.mjs && node --check dingtalk-bridge.mjs && node --check herdr-paths.mjs && node --check inbound.mjs && node --check installer.mjs && node --check bin/herdr-dingtalk-omo-bridge.mjs && node --check probe.mjs && node --check probe-emotion.mjs && node --check startup.mjs && node --check session-log.mjs && node --check supervise.mjs",
     "check-paths": "node .github/scripts/check-paths.mjs",
     "check-manifest": "node .github/scripts/check-manifest.mjs",
     "scan-secrets": "node .github/scripts/scan-secrets.mjs .",
