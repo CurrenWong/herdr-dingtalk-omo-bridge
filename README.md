@@ -410,6 +410,30 @@ a 1M-token window. It fails instantly without a model call. The success report
 has not been observed, so anything that is not the failure line is passed
 through as raw screen text.
 
+**Why not `herdr agent prompt`.** Herdr has exactly the right command for this and
+the bridge does not use it. `herdr agent prompt` submits text and Enter as one
+bracketed-paste unit and refuses outright with `agent_blocked` when the agent is
+sitting on a dialog — but it answers `agent_not_ready` ("no longer the pane
+foreground process") for every OmO pane, because these were started by a human at
+a shell prompt rather than by `herdr agent start`, and Herdr's `pi.toml` has no
+readiness rule at all: both of its rules only match the working spinner, so an
+idle OmO reports `rule: none` under `herdr agent explain`. `agent attach
+--takeover` is likewise unavailable — "direct terminal attach is not supported on
+Windows yet".
+
+So the bridge keeps typing at the pane and reimplements the two guarantees it
+would have bought, against `herdr agent get`:
+
+- **Never type into a blocked pane.** If `agent_status` is `blocked` before the
+  send, the text would land in whichever field the dialog has focused and be lost,
+  so the message is answered instead.
+- **Confirm the turn actually started.** `agent prompt --wait` watches for activity
+  within five seconds and reports `agent_prompt_stalled`; a submission that never
+  took is otherwise indistinguishable from a slow turn and burns the whole answer
+  timeout. Measured against a throwaway agent: `idle → working` at 1.6s and
+  `done → working` at 1.1s, so the 8s gate (`LAB_SUBMIT_STALL_MS`) has headroom.
+  It is skipped when no agent resolves, since there is then no signal to wait on.
+
 Reading the screen back needs care, because a TUI repaints rather than appends
 and the same command run twice produces identical output. The bridge reads the
 scrollback buffer (`--source recent`) rather than the viewport, so the old screen
@@ -642,6 +666,23 @@ If you get it running elsewhere, widening the manifest to
 触发的，不是按消息条数，所以在 1M 窗口里，2 条消息的会话和 12 条消息 / 30K token 的会话都实测回
 `Nothing to compact (session too small)`，且是秒回、不调模型。成功时的报告长什么样没有观测到，
 所以只要不是那条失败行，就按屏幕原文透传。
+
+**为什么不用 `herdr agent prompt`**。Herdr 明明有正合适的命令，桥却没用。`herdr agent prompt`
+把文本和回车作为一次 bracketed-paste 有序写入，agent 卡在对话框上时还会直接以 `agent_blocked`
+拒发——但它对每个 OmO pane 都回 `agent_not_ready`（"no longer the pane foreground process"）：
+这些 OmO 是人在 shell 里手敲起来的，不是 `herdr agent start` 起的；而且 Herdr 的 `pi.toml`
+压根没有 readiness 规则，两条规则都只匹配 working 的转圈，所以 idle 的 OmO 在
+`herdr agent explain` 下是 `rule: none`。`agent attach --takeover` 同样用不了——"direct
+terminal attach is not supported on Windows yet"。
+
+所以桥继续往 pane 里敲字，但用 `herdr agent get` 把 `agent prompt` 本来能给的两条保证自己补上：
+
+- **绝不往 blocked 的 pane 里打字**。发送前若 `agent_status` 是 `blocked`，文本会落进对话框当前
+  聚焦的输入框然后丢失，所以改成直接回消息。
+- **确认这一轮真的开始了**。`agent prompt --wait` 会在五秒内观察活动并报 `agent_prompt_stalled`；
+  否则一次没送出去的提交和一轮慢的回合长得一模一样，会白白烧完整轮超时。拿一次性 agent 实测：
+  `idle → working` 1.6 秒、`done → working` 1.1 秒，所以 8 秒门限（`LAB_SUBMIT_STALL_MS`）
+  余量充足。没有 agent 可解析时跳过这道门——那时根本没有信号可等。
 
 读屏还有个坑：TUI 是重绘而不是追加，同一条命令跑两次输出一模一样，按文本比对分不出
 新旧。所以桥读的是回滚缓冲（`--source recent`）而不是视口，旧屏才是新屏的真前缀。

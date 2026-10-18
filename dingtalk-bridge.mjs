@@ -59,6 +59,10 @@ const PUSH_LIMIT = Number(process.env.LAB_PUSH_LIMIT ?? 4000);
 // of a long-running agent's narration gets forwarded.
 const PROGRESS_LIMIT = Number(process.env.LAB_PROGRESS_LIMIT ?? 10);
 
+// How long to wait for the agent to enter `working` after the text goes in.
+// `herdr agent prompt` uses five seconds for the same gate.
+const SUBMIT_STALL_MS = Number(process.env.LAB_SUBMIT_STALL_MS ?? 8000);
+
 // Every string the bot says to the user lives here so the plugin is not welded
 // to one language. Set LAB_LANG=en for English; anything else falls back to the
 // Chinese original.
@@ -67,6 +71,7 @@ const TEXT = {
   zh: {
     fallbackTitle: "回复",
     blocked: "⚠️ OmO 卡在一个需要确认的界面上（blocked），请在 Herdr 里看一眼。",
+    stalled: "⚠️ 消息已经发出去了，但 OmO 没有开始工作（8 秒内没进入 working）。可能刚被什么界面挡住了，去 Herdr 里看一眼。",
     timeout: (s) => `⏱ OmO 在 ${s} 秒内没有给出回答。`,
     unauthorized: (id) => `未授权的发送者：${id}`,
     noAgent: (name) => `找不到 Herdr agent「${name}」，桥不知道该把消息投到哪里。`,
@@ -145,6 +150,7 @@ const TEXT = {
   en: {
     fallbackTitle: "Reply",
     blocked: "⚠️ OmO is blocked on a confirmation prompt — take a look in Herdr.",
+    stalled: "⚠️ The message went out, but OmO never started working (no `working` within 8s). Something may have been in the way — take a look in Herdr.",
     timeout: (s) => `⏱ OmO did not answer within ${s}s.`,
     unauthorized: (id) => `Unauthorized sender: ${id}`,
     noAgent: (name) => `Herdr agent "${name}" not found — the bridge has nowhere to send this.`,
@@ -775,14 +781,54 @@ async function askAgent(paneId, text, cwd, onProgress) {
   log("session snapshot", JSON.stringify({ file: snap?.path ?? null, size: snap?.size ?? 0 }));
   const paneBefore = TARGET ? readPane(paneId) : "";
 
+  // `herdr agent prompt` is the right tool for this — it writes the text and Enter
+  // as one bracketed-paste unit and refuses outright when the agent is sitting on
+  // a dialog. It cannot be used here: it answers `agent_not_ready` ("no longer the
+  // pane foreground process") for every OmO pane, because these were started by a
+  // human at a shell prompt rather than by `herdr agent start`, and Herdr's pi
+  // detection manifest has no readiness rule at all — both of its rules only match
+  // the working spinner, so an idle OmO reports `rule: none`. The two guarantees it
+  // would have given are therefore reimplemented below against `agent get`.
+  const before = agentInfo();
+  if (before?.agent_status === "blocked") {
+    // Typing now would land in whichever field the dialog has focused, and the
+    // message would be silently lost rather than delivered.
+    log("!! not submitting, agent is blocked", JSON.stringify({ status: before.agent_status }));
+    return { text: t("blocked"), ok: false };
+  }
+
   // A literal newline in send-text would submit a half prompt, so flatten.
   const payload = text.replace(/\r?\n/g, " ⏎ ");
   herdr(["pane", "send-text", paneId, payload]);
   await sleep(400);
   herdr(["pane", "send-keys", paneId, "enter"]);
 
+  // `agent prompt --wait` also confirms the agent actually began working within
+  // five seconds and reports `agent_prompt_stalled` when it does not. Without that
+  // check a submission that never took — the text swallowed by a race with a
+  // redraw, say — looks exactly like a slow turn, and the caller waits out the full
+  // timeout before saying anything.
+  //
+  // Measured against a throwaway agent: idle → working at 1.6s, and done → working
+  // at 1.1s, so 8s has real headroom. Skipped when there is no agent to ask at all
+  // (the legacy bare-pane mode), which would otherwise time out on every message.
+  if (!before) {
+    log("no agent to ask, submission gate skipped");
+  } else {
+    const submittedAt = Date.now();
+    let sawWorking = before.agent_status === "working";
+    while (!sawWorking && Date.now() - submittedAt < SUBMIT_STALL_MS) {
+      await sleep(800);
+      sawWorking = agentInfo()?.agent_status === "working";
+    }
+    if (!sawWorking) {
+      log("!! no working state after submit", JSON.stringify({ ms: SUBMIT_STALL_MS }));
+      return { text: t("stalled"), ok: false };
+    }
+  }
+  let sawWorking = before?.agent_status === "working";
+
   const deadline = Date.now() + ANSWER_TIMEOUT_MS;
-  let sawWorking = false;
   // Narration is deduped by byte offset so a row seen on two polls is not sent
   // twice. Capped because DingTalk rate-limits a robot to ~20 messages/minute.
   const narrated = new Set();
