@@ -100,6 +100,37 @@ if (!buildParts.join(" ").includes("npm ci")) {
   problems.push("manifest [[build]] should run `npm ci --omit=dev`, matching CI");
 }
 
+// A lockfile can parse and still not reproduce: an entry without `resolved` or
+// `integrity` reinstalls from whatever the registry serves that day. Worse,
+// npm ci aborts on a malformed lock, and the manifest runs exactly that — so
+// the failure would land on a user mid-install with no obvious cause.
+const lockEntries = Object.entries(lock.packages ?? {}).filter(([k]) => k !== "");
+let missingPinned = 0;
+
+if (lock.lockfileVersion !== 3) {
+  problems.push(`package-lock.json lockfileVersion is ${lock.lockfileVersion}, expected 3 (npm 9+)`);
+}
+if (lockRoot.license && lockRoot.license !== pkg.license) {
+  problems.push(`lockfile license "${lockRoot.license}" != package.json "${pkg.license}"`);
+}
+
+for (const [path, meta] of lockEntries) {
+  if (meta.link) continue;
+  if (!meta.resolved) problems.push(`${path}: no resolved URL in lockfile`);
+  if (!meta.integrity) problems.push(`${path}: no integrity hash in lockfile`);
+  if (!/^sha(1|256|512)-/.test(meta.integrity ?? "")) {
+    problems.push(`${path}: integrity is not a sha digest (${meta.integrity})`);
+  }
+  if (!meta.resolved || !meta.integrity) missingPinned += 1;
+}
+
+for (const dep of Object.keys(pkg.dependencies ?? {})) {
+  const present = lockEntries.some(([k, m]) => m.name === dep || k.endsWith(`node_modules/${dep}`));
+  if (!present) problems.push(`declared dependency "${dep}" has no lockfile entry`);
+}
+
+console.log(`lockfile entries:   ${lockEntries.length} (${lockEntries.length - missingPinned} fully pinned)`);
+
 console.log("");
 if (problems.length) {
   console.error("FAIL:");
