@@ -88,30 +88,52 @@ second Stream connection when one is already live.
 | Node | ≥ 20 (developed against 24) |
 | OmO | the `omo` CLI on `PATH` |
 | DingTalk | a robot app with **Stream mode** enabled |
-| build | `npm` — the manifest runs `npm ci --omit=dev` at install |
+| build | `npm` on `PATH` — the manifest runs `npm ci --omit=dev`, and a failed build **aborts the install** |
+
+See [Prerequisites](#prerequisites) for how to check each one.
 
 ## Install
+
+### Prerequisites
+
+Check these first — every one of them fails in a confusing way if missing.
+
+```bash
+node --version   # >= 20
+npm --version    # the install runs `npm ci`; without it the install ABORTS
+omo --version    # the agent pane's command is literally `omo`
+herdr --version  # >= 0.9.0
+```
+
+`omo` matters more than it looks: Herdr runs pane commands without a shell, so
+the binary has to be on `PATH` or the pane exits instantly and gets reclaimed.
+The startup hook will report `no new pane appeared for the OmO entrypoint`.
 
 ### 1. Create the DingTalk app
 
 In the [DingTalk developer console](https://open-dev.dingtalk.com/):
 
 - create an app and add a **robot** capability;
-- enable **Stream mode** (no callback URL needed);
-- copy the **Client ID (AppKey)** and **Client Secret (AppSecret)**.
+- enable **Stream mode** (there is no callback URL to configure — the bridge
+  holds an outbound WebSocket).
 
-The bundled `auth` action performs the device-code login that turns those
-credentials into a usable bot. You do not need to hand-edit any file.
+That is all. **Do not copy the AppKey/AppSecret anywhere** — the next step
+obtains them for you.
 
 ### 2. Install the plugin
 
 ```bash
-# from GitHub
-herdr plugin install <owner>/<repo>
+herdr plugin install CurrenWong/herdr-dingtalk-omo-bridge
+```
 
-# or, while developing
-herdr plugin link /path/to/this/repo
-npm install          # `plugin link` does not run build commands
+Herdr shows a preview of the source and the commands it will run. Confirm, and
+it clones, runs `npm ci --omit=dev`, and registers the plugin. Use `--yes` to
+skip the preview, `--ref <ref>` to pin a revision.
+
+Confirm it landed:
+
+```bash
+herdr plugin list        # expect: dingtalk-omo-bridge (DingTalk ↔ OmO Bridge) enabled
 ```
 
 ### 3. Register the bot
@@ -120,9 +142,13 @@ npm install          # `plugin link` does not run build commands
 herdr plugin action invoke dingtalk-omo-bridge.auth
 ```
 
-It writes a QR code to `state/auth/qrcode.png` (or prints a scan URL if no
-Python with `segno` is available) and blocks until you scan it. On success the
-credentials land in the plugin's config directory as `.env`.
+This runs DingTalk's device flow: it prints a scan URL and user code, writes a
+QR code to `state/auth/qrcode.png` (needs Python with `segno`; without it you
+get the URL instead), and then **blocks while you scan**. Scanning it in the
+DingTalk app is what yields the AppKey and AppSecret — they are written to the
+plugin's config directory as `.env` and never need to be handled by hand.
+
+The code is good for a couple of hours; re-run the action if it expires.
 
 ### 4. Start it
 
@@ -132,12 +158,49 @@ Restart Herdr, or:
 herdr server reload-config
 ```
 
-The startup hook opens the two panes and the bot goes live. Check with
-`herdr pane list` — you should see an **OmO (DingTalk)** tab and a
-**DingTalk ↔ OmO bridge** tab.
+The startup hook opens both panes and the bot goes live. Verify:
 
-To get it listed in the Herdr plugin marketplace, add the GitHub topic
-`herdr-plugin` to the repository.
+```bash
+herdr pane list    # expect an "OmO (DingTalk)" tab and a "DingTalk ↔ OmO bridge" tab
+herdr agent list   # expect an agent named "dingtalk"
+```
+
+Then send the bot a message in DingTalk. It should be tagged 👌**Received**
+almost immediately, and 🥳**Done** a few seconds later.
+
+### Upgrading
+
+```bash
+herdr plugin update CurrenWong/herdr-dingtalk-omo-bridge
+```
+
+Existing processes are not restarted, so run `herdr server reload-config`
+afterwards (or restart Herdr) to pick up new code.
+
+### Uninstalling
+
+```bash
+herdr plugin uninstall dingtalk-omo-bridge
+```
+
+Your credentials and logs in the Herdr config/state directories are left alone;
+delete them by hand if you want a clean slate.
+
+### Developing locally
+
+```bash
+herdr plugin link /path/to/herdr-dingtalk-omo-bridge
+npm install        # `plugin link` does NOT run build commands
+```
+
+`plugin link` registers a working directory instead of a clone, so edits take
+effect on the next pane start. Note that installing over a linked plugin is
+refused — `herdr plugin unlink` first.
+
+---
+
+*Publishing note: this repository carries the GitHub topic `herdr-plugin`, which
+is what makes Herdr's plugin marketplace index it.*
 
 ## Configuration
 
