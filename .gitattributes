@@ -1,0 +1,6 @@
+# Normalize line endings in the repository, check them out as LF on every
+# platform. Windows contributors should not produce CRLF-only diffs.
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary

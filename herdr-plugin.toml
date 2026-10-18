@@ -1,0 +1,57 @@
+id = "lab.dingtalk-bridge"
+name = "DingTalk ↔ OmO Bridge"
+version = "0.1.0"
+min_herdr_version = "0.9.0"
+description = "Bridge DingTalk messages to an OmO coding-agent session in Herdr, post the answer back, and tag each message as received/done."
+platforms = ["windows"]
+
+# A GitHub install clones the repo without node_modules, so pull dependencies
+# before anything tries to `import "dingtalk-stream"`. `plugin link` does NOT
+# run build commands — when developing locally, run `npm install` yourself.
+[[build]]
+command = ["npm", "ci", "--omit=dev"]
+
+# One-shot diagnostic: prints the plugin runtime environment Herdr injects.
+[[actions]]
+id = "probe"
+title = "Probe Herdr plugin environment"
+command = ["node", "probe.mjs"]
+
+# One-shot DingTalk bot registration (device flow). Opens a QR code in
+# ./state/auth/qrcode.png and blocks until credentials are issued or it expires.
+[[actions]]
+id = "auth"
+title = "Register a DingTalk bot by QR code"
+command = ["node", "auth.mjs"]
+
+# One-shot: after Herdr restores the session, make sure the OmO agent pane and
+# the bridge pane are up, then exit. The long-lived Stream connection lives in
+# the pane below, not in this hook — DingTalk allows only one connection per app.
+[[startup]]
+command = ["node", "startup.mjs"]
+
+# The OmO session that answers DingTalk messages. Herdr detects OmO from its TUI;
+# startup.mjs waits for that and names the agent "dingtalk", which is how the
+# bridge finds its target.
+#
+# NOT supervised, unlike the bridge below. Herdr's `pane send-text` addresses the
+# pane's own child process, so wrapping `omo` in supervise.mjs demoted it to a
+# grandchild and every message the bridge typed was silently dropped — OmO never
+# saw the prompt and never answered. A full-screen TUI must stay the pane's
+# direct child. Trade-off: if OmO exits, it stays down until the next Herdr
+# restart, but the bridge notices and says so instead of hanging.
+[[panes]]
+id = "omo-agent"
+title = "OmO (DingTalk)"
+placement = "tab"
+command = ["omo"]
+
+# The bridge itself: Stream client in, pane input out, sessionWebhook reply.
+# Headless (it logs its own file), so supervising it is safe: Herdr only
+# reclaims a pane when its command exits, and nothing here restarts a crashed
+# bridge until the next server start.
+[[panes]]
+id = "dingtalk-stream"
+title = "DingTalk ↔ OmO bridge"
+placement = "tab"
+command = ["node", "supervise.mjs", "node", "dingtalk-bridge.mjs"]

@@ -1,0 +1,26 @@
+{
+  "name": "herdr-dingtalk-omo-bridge",
+  "version": "0.1.0",
+  "description": "Herdr plugin that bridges DingTalk messages to an OmO coding-agent session, posts the answer back, and tags each message as received/done.",
+  "keywords": [
+    "herdr",
+    "dingtalk",
+    "omo",
+    "agent",
+    "bridge",
+    "plugin"
+  ],
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "check": "node --check dingtalk-bridge.mjs && node --check startup.mjs && node --check supervise.mjs && node --check auth.mjs",
+    "check-reply": "node check-reply.mjs",
+    "probe-emotion": "node probe-emotion.mjs"
+  },
+  "dependencies": {
+    "dingtalk-stream": "^2.1.6-beta.1"
+  }
+}

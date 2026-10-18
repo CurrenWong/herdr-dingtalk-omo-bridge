@@ -1,0 +1,28 @@
+# Dependencies
+node_modules/
+
+# Runtime state. THIS DIRECTORY CONTAINS LIVE CREDENTIALS.
+# state/auth/credentials.json holds the DingTalk client_secret in plaintext,
+# and state/auth/qrcode.png is a single-use device-login code. Never commit.
+state/
+
+# Herdr writes plugin config (including the .env with client_id/client_secret)
+# outside the repo, but keep an explicit rule in case that ever moves.
+.env
+.env.*
+!.env.example
+
+# Reference material fetched from herdr.dev during development — not ours to
+# redistribute, so it is not vendored. Fetch it yourself if you need it; see
+# docs/herdr-notes.md for the URLs.
+# (Anchored to the repo root so it cannot swallow docs/herdr-notes.md.)
+
+# Editor / OS noise
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/
+
+# Logs
+*.log
