@@ -3,6 +3,7 @@
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve as resolvePath } from "node:path";
+import { lastAssistantText } from "./session-log.mjs";
 
 const OMO_SESSIONS = join(homedir(), ".omo", "agent", "sessions");
 // Default to wherever you run it from — usually the agent pane's cwd.
@@ -41,29 +42,11 @@ function sessionFileForCwd(cwd) {
   return best;
 }
 
-function lastAssistantText(file, from) {
-  // `from` is a BYTE offset — the state file stores statSync().size, and the
-  // bridge's reader (session-log.mjs) slices a Buffer with it. Slicing the
-  // decoded string moves by UTF-16 code units instead, and one Chinese character
-  // is three bytes, so the resume point landed inside a line: this tool reported
-  // an answer that was cut in half, or the previous turn's, with no error.
-  const buf = readFileSync(file.path);
-  const slice = (from > 0 && from <= buf.length ? buf.subarray(from) : buf).toString("utf8");
-  let answer = null;
-  for (const line of slice.split("\n")) {
-    if (!line.trim()) continue;
-    let row;
-    try {
-      row = JSON.parse(line);
-    } catch {
-      continue;
-    }
-    if (row.type !== "message" || row.message?.role !== "assistant") continue;
-    const parts = (row.message.content ?? []).filter((c) => c.type === "text" && c.text).map((c) => c.text.trim());
-    if (parts.length) answer = parts.join("\n\n");
-  }
-  return answer;
-}
+// Extraction lives in session-log.mjs, which is what the bridge itself calls.
+// A second copy used to sit here and had already diverged: it accepted a
+// narration message (text bundled with the toolCall it announces) as an answer,
+// which the bridge never sends — so this diagnostic could report a reply that
+// the user never received.
 
 const f = sessionFileForCwd(CWD);
 if (!f) {

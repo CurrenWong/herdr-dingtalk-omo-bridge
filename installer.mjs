@@ -13,7 +13,7 @@
 //   * `--dry-run` prints the whole plan and changes nothing.
 //   * `--no-link` stops after the files are in place, for inspecting first.
 import { spawnSync } from "node:child_process";
-import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -139,20 +139,45 @@ function install(opts) {
 
   console.log(`installing ${PLUGIN_ID}@${pkg.version}`);
   console.log(`  target: ${target}`);
-  mkdirSync(target, { recursive: true });
-  const count = copyPayload(target);
-  writeFileSync(markerPath, `${MARKER}\nversion=${pkg.version}\n`, "utf8");
+
+  // Build beside the target, then swap it in.
+  //
+  // Copying straight into the final directory meant a crash or ENOSPC left a
+  // half-written tree with no marker, which every later run then refused as
+  // "not created by this installer" — a directory only rm could fix. And a
+  // reinstall copied over files in place, which is the open-file overwrite the
+  // versioned directories exist to avoid (EBUSY mid-copy on Windows).
+  const staging = join(root, `.staging-${pkg.version}-${process.pid}`);
+  rmSync(staging, { recursive: true, force: true });
+  mkdirSync(staging, { recursive: true });
+  const count = copyPayload(staging);
+  writeFileSync(join(staging, ".installed-by"), `${MARKER}\nversion=${pkg.version}\n`, "utf8");
   console.log(`  copied: ${count} entries`);
 
   console.log("  installing dependencies…");
-  const deps = installDeps(target);
+  const deps = installDeps(staging);
   if (!deps.ok) {
+    rmSync(staging, { recursive: true, force: true });
     console.error(`  dependency install FAILED (${deps.runner})`);
     if (deps.error) console.error(deps.error.replace(/^/gm, "    "));
     console.error(`\n  Run it by hand to see the full output:\n    cd "${target}" && ${deps.runner}`);
     return 1;
   }
   console.log(`  dependencies: ok (${deps.runner})`);
+
+  if (existsSync(target)) {
+    const previous = `${target}.old-${Date.now()}`;
+    renameSync(target, previous);
+    try {
+      renameSync(staging, target);
+    } catch (err) {
+      renameSync(previous, target); // put the old one back before reporting
+      throw err;
+    }
+    rmSync(previous, { recursive: true, force: true });
+  } else {
+    renameSync(staging, target);
+  }
 
   if (opts.noLink) {
     console.log(`\n  --no-link given, so nothing was registered with Herdr. To finish:`);

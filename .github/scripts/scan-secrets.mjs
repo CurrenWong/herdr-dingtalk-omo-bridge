@@ -6,6 +6,7 @@
 // one known leak.
 //
 // Usage: node .github/scripts/scan-secrets.mjs [dir]
+import { spawnSync } from "node:child_process";
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join, relative, sep } from "node:path";
 
@@ -32,6 +33,10 @@ const PATTERNS = [
 // Files that must never be committed at all.
 const FORBIDDEN = [/^state\//, /(^|\/)\.env(\.|$)/, /(^|\/)node_modules\//, /\.pem$/, /id_rsa/];
 
+// Whether a forbidden path is only a problem on disk (no git to ask) or only a
+// problem once git carries it. Set before the walk; see trackedForbidden().
+let checkForbiddenOnDisk = true;
+
 const findings = [];
 
 // The report is printed into CI logs, which outlive the run and are readable by
@@ -53,8 +58,10 @@ function scanFile(path) {
   }
   const rel = relative(root, path).split(sep).join("/");
 
-  for (const re of FORBIDDEN) {
-    if (re.test(rel)) findings.push({ rel, rule: "forbidden path", snippet: rel });
+  if (checkForbiddenOnDisk) {
+    for (const re of FORBIDDEN) {
+      if (re.test(rel)) findings.push({ rel, rule: "forbidden path", snippet: rel });
+    }
   }
   // Decide by basename, not just extension. `.npmrc` has no extension at all
   // and is exactly where an npm token would be pasted, so an extension-only
@@ -90,7 +97,27 @@ function walk(dir) {
   }
 }
 
+// A forbidden path is a leak once git carries it. `state/` and `node_modules/`
+// exist in every working checkout and are gitignored — the walker skips them,
+// which also made their FORBIDDEN rules unreachable: a credential committed
+// under `state/` was never reported. Ask git what is tracked instead of
+// inferring it from what happens to be on disk.
+function trackedForbidden() {
+  const r = spawnSync("git", ["ls-files", "-z"], { cwd: root, encoding: "utf8", timeout: 60000 });
+  if (r.status !== 0) return null;
+  return r.stdout.split("\0").filter(Boolean).filter((rel) => FORBIDDEN.some((re) => re.test(rel)));
+}
+
+const tracked = trackedForbidden();
+// Without git there is nothing better than presence on disk; with it, a file
+// sitting untracked in a working copy is not a commit.
+checkForbiddenOnDisk = tracked === null;
+
 walk(root);
+
+if (tracked) {
+  for (const rel of tracked) findings.push({ rel, rule: "forbidden path", snippet: rel });
+}
 
 if (!findings.length) {
   console.log("PASS — no secrets and no forbidden paths found");
