@@ -50,15 +50,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
-      # A bad manifest is the one failure mode that cannot be caught locally
-      # without Herdr installed, so at least keep it parseable and consistent.
-      - name: Manifest declares the same id the code defaults to
-        run: |
-          manifest_id=$(grep -oP '(?<=^id = ")[^"]+' herdr-plugin.toml)
-          code_id=$(grep -oP '(?<=DEFAULT_PLUGIN_ID = ")[^"]+' herdr-paths.mjs)
-          echo "manifest: $manifest_id"
-          echo "code:     $code_id"
-          test "$manifest_id" = "$code_id" || {
-            echo "::error::plugin id mismatch between herdr-plugin.toml and herdr-paths.mjs"
-            exit 1
-          }
+      # A manifest that disagrees with the code defaults would send the bridge
+      # to the wrong state directory, and nothing local would catch it without
+      # Herdr installed.
+      - name: Manifest matches the code defaults
+        run: node .github/scripts/check-manifest.mjs

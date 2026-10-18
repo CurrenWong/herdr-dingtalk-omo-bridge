@@ -36,9 +36,10 @@ when Herdr restarts, and leaves you a TUI you can watch while it works.
 
 ```bash
 npm ci
-npm run check          # syntax-check every shipped script
-npm run check-paths    # platform-correct config/state resolution
-npm run scan-secrets   # pattern-based leak scan (runs in CI too)
+npm run check            # syntax-check every shipped script
+npm run check-paths      # platform-correct config/state resolution
+npm run check-manifest   # manifest agrees with the code defaults
+npm run scan-secrets     # pattern-based leak scan (runs in CI too)
 ```
 
 CI runs on Linux, macOS and Windows. Keep it green on all three — that is what
