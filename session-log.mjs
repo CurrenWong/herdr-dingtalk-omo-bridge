@@ -33,6 +33,58 @@ export function rowsAppendedSince(file, fromByte) {
 }
 
 /**
+ * Every assistant message appended since `fromByte`, in order.
+ *
+ * Each entry carries `offset` (a stable identity for dedup across polls) and
+ * `final`, which is true only for a message made purely of text.
+ *
+ * `final === false` means the agent is narrating what it is about to do — those
+ * messages arrive bundled with the toolCall they announce. They are useful as
+ * progress reports and misleading as answers, so the caller can do both:
+ * forward them while waiting, and never end the turn on one.
+ */
+export function assistantMessagesSince(file, fromByte) {
+  const rows = rowsAppendedSince(file, fromByte);
+  if (!rows?.length) return [];
+
+  const out = [];
+  let offset = fromByte;
+  const buf = readFileSync(file.path);
+  const tail = buf.subarray(fromByte).toString("utf8");
+
+  for (const line of tail.split("\n")) {
+    const start = offset;
+    offset += Buffer.byteLength(line, "utf8") + 1;
+    if (!line.trim()) continue;
+
+    let row;
+    try {
+      row = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (row.type !== "message" || row.message?.role !== "assistant") continue;
+
+    const content = row.message.content;
+    if (typeof content === "string") {
+      const text = content.trim();
+      if (text) out.push({ offset: start, text, final: true });
+      continue;
+    }
+    if (!Array.isArray(content)) continue;
+
+    const stillActing = content.some((c) => typeof c !== "string" && (c?.type ?? "") !== "text");
+    const text = content
+      .map((c) => (typeof c === "string" ? c : c.text))
+      .filter((t) => typeof t === "string" && t.trim())
+      .map((t) => t.trim())
+      .join("\n\n");
+    if (text) out.push({ offset: start, text, final: !stillActing });
+  }
+  return out;
+}
+
+/**
  * The assistant's answer among the rows appended since `fromByte`, or null if
  * the turn has not produced one yet.
  *
@@ -53,27 +105,6 @@ export function lastAssistantText(file, fromByte) {
   const sawUser = rows.some((r) => r.type === "message" && r.message?.role === "user");
   if (!sawUser) return null;
 
-  let answer = null;
-  for (const row of rows) {
-    if (row.type !== "message" || row.message?.role !== "assistant") continue;
-
-    const content = row.message.content;
-    if (typeof content === "string") {
-      if (content.trim()) answer = content.trim();
-      continue;
-    }
-    if (!Array.isArray(content)) continue;
-
-    // Any toolCall/tool_result-ish part means the agent is still working: this
-    // is narration, not a conclusion.
-    const stillActing = content.some((c) => typeof c !== "string" && (c?.type ?? "") !== "text");
-    if (stillActing) continue;
-
-    const parts = content
-      .map((c) => (typeof c === "string" ? c : c.text))
-      .filter((t) => typeof t === "string" && t.trim())
-      .map((t) => t.trim());
-    if (parts.length) answer = parts.join("\n\n");
-  }
-  return answer;
+  const candidates = assistantMessagesSince(file, fromByte).filter((m) => m.final);
+  return candidates.length ? candidates[candidates.length - 1].text : null;
 }

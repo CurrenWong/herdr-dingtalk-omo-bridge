@@ -22,7 +22,7 @@ import { join, resolve as resolvePath } from "node:path";
 import { DWClient, TOPIC_ROBOT } from "dingtalk-stream";
 import { saveAttachment } from "./attachments.mjs";
 import { ACTIONS, classifyInbound } from "./inbound.mjs";
-import { lastAssistantText } from "./session-log.mjs";
+import { assistantMessagesSince, lastAssistantText } from "./session-log.mjs";
 import { DEFAULT_PLUGIN_ID, defaultConfigDir, defaultStateDir } from "./herdr-paths.mjs";
 
 const HERDR = process.env.HERDR_BIN_PATH ?? "herdr";
@@ -45,6 +45,9 @@ const ATTACHMENT_DIR = process.env.LAB_ATTACHMENT_DIR ?? ".dingtalk-inbox";
 // One DingTalk markdown message comfortably carries a few thousand characters;
 // beyond this the tail is cut and the reply says so.
 const PUSH_LIMIT = Number(process.env.LAB_PUSH_LIMIT ?? 4000);
+// DingTalk rate-limits a robot to roughly 20 messages a minute, so cap how much
+// of a long-running agent's narration gets forwarded.
+const PROGRESS_LIMIT = Number(process.env.LAB_PROGRESS_LIMIT ?? 10);
 
 // Every string the bot says to the user lives here so the plugin is not welded
 // to one language. Set LAB_LANG=en for English; anything else falls back to the
@@ -64,6 +67,7 @@ const TEXT = {
       `用户通过钉钉发来一个 ${type} 附件，已保存到本地：\n${path}\n（${size}）\n\n请查看这个文件并回应。如果无法直接读取其中的内容，请说明原因，不要猜测。`,
     attachmentFailed: (err) => `附件下载失败：${err}`,
     truncated: (n) => `…（内容过长，已截断剩余 ${n} 字符）`,
+    progress: (text) => `⏳ ${text}`,
   },
   en: {
     fallbackTitle: "Reply",
@@ -78,6 +82,7 @@ const TEXT = {
       `The user sent a ${type} attachment through DingTalk. It is saved locally at:\n${path}\n(${size})\n\nPlease look at it and respond. If you cannot actually read its contents, say so rather than guessing.`,
     attachmentFailed: (err) => `Could not download the attachment: ${err}`,
     truncated: (n) => `…(${n} more characters truncated)`,
+    progress: (text) => `⏳ ${text}`,
   },
 };
 const t = (key, ...args) => TEXT[LANG][key](...args);
@@ -332,7 +337,11 @@ const state = { started_at: new Date().toISOString(), seen: 0, last_push: null }
 
 // Returns {text, ok} so the caller knows whether to tag the turn Done or
 // Error — a timeout or a blocked prompt is not a successful answer.
-async function askAgent(paneId, text, cwd) {
+//
+// `onProgress` receives the agent's narration as it happens. Those messages are
+// useless as an answer but genuinely useful while waiting, especially for turns
+// that spend a minute installing a package first.
+async function askAgent(paneId, text, cwd, onProgress) {
   const snap = sessionFileForCwd(cwd);
   log("session snapshot", JSON.stringify({ file: snap?.path ?? null, size: snap?.size ?? 0 }));
   const paneBefore = TARGET ? readPane(paneId) : "";
@@ -345,6 +354,11 @@ async function askAgent(paneId, text, cwd) {
 
   const deadline = Date.now() + ANSWER_TIMEOUT_MS;
   let sawWorking = false;
+  // Narration is deduped by byte offset so a row seen on two polls is not sent
+  // twice. Capped because DingTalk rate-limits a robot to ~20 messages/minute.
+  const narrated = new Set();
+  let progressSent = 0;
+
   while (Date.now() < deadline) {
     await sleep(900);
     const info = agentInfo();
@@ -352,7 +366,20 @@ async function askAgent(paneId, text, cwd) {
     if (snap) {
       const fresh = sessionFileForCwd(cwd);
       const file = fresh && fresh.path !== snap.path ? fresh : snap;
-      const answer = lastAssistantText(file, snap.path === file.path ? snap.size : 0);
+      const fromByte = snap.path === file.path ? snap.size : 0;
+
+      if (onProgress) {
+        for (const m of assistantMessagesSince(file, fromByte)) {
+          if (m.final || narrated.has(m.offset)) continue;
+          if (progressSent >= PROGRESS_LIMIT) break;
+          narrated.add(m.offset);
+          progressSent += 1;
+          log("progress", JSON.stringify(m.text.slice(0, 200)));
+          await onProgress(m.text).catch((err) => log("!! progress push failed", err.message));
+        }
+      }
+
+      const answer = lastAssistantText(file, fromByte);
       // While the agent is still "working", its latest text is commentary on
       // what it is about to do, not a conclusion. The structural check inside
       // lastAssistantText catches the common case (narration bundled with a
@@ -457,7 +484,10 @@ async function handle(msg) {
     }
   }
 
-  const answer = await askAgent(paneId, promptText, info?.cwd);
+  const answer = await askAgent(paneId, promptText, info?.cwd, async (progress) => {
+    // Marked so a running commentary is never mistaken for the result.
+    await push(msg.sessionWebhook, t("progress", progress.slice(0, 800)));
+  });
   // Truncating silently would look like the agent stopped mid-sentence.
   const body = answer.text.length > PUSH_LIMIT
     ? `${answer.text.slice(0, PUSH_LIMIT)}\n\n${t("truncated", answer.text.length - PUSH_LIMIT)}`
