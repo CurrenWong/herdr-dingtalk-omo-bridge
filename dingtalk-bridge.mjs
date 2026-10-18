@@ -73,6 +73,41 @@ const MAX_QUEUE = Number(process.env.LAB_QUEUE_LIMIT ?? 3);
 // to one language. Set LAB_LANG=en for English; anything else falls back to the
 // Chinese original.
 const LANG = (process.env.LAB_LANG ?? "zh").toLowerCase().startsWith("en") ? "en" : "zh";
+
+// Uptime arrives in milliseconds, and the first version divided it by 60 as if
+// it were seconds: a bridge up for 51s reported "848 分钟" (50,880 / 60). Whole
+// units, so the number cannot be off by a factor of a thousand again.
+function formatUptime(ms) {
+  const total = Math.max(0, Math.round(Number(ms) / 1000));
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  const unit = LANG === "en" ? { h: "h", m: "min", s: "s" } : { h: "小时", m: "分", s: "秒" };
+  const parts = [];
+  if (h) parts.push(`${h} ${unit.h}`);
+  if (m || h) parts.push(`${m} ${unit.m}`);
+  parts.push(`${s} ${unit.s}`);
+  return parts.join(" ");
+}
+
+// A message body is markdown, and DingTalk's renderer eats backslashes: a path
+// went out as `C:Userscurre.copawworkspacesJ6c4muherdr-bridge-lab`. A code span
+// is rendered literally, so the path is wrapped rather than rewritten -- it has
+// to stay the path the user would type.
+function codeSpan(value) {
+  return value ? `\`${value}\`` : "—";
+}
+
+// The state file stores ISO/UTC. Shown in UTC a timestamp reads eight hours
+// early to anyone in this timezone, so print it in the machine's own zone.
+function localStamp(iso) {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+}
+
 const TEXT = {
   zh: {
     fallbackTitle: "回复",
@@ -151,12 +186,12 @@ const TEXT = {
     notAborting: "🛑 现在没有在跑的任务。",
     status: (s) =>
       [
-        `🟢 桥已连上，运行 ${Math.round(s.uptime / 60)} 分钟`,
+        `🟢 桥已连上，运行 ${formatUptime(s.uptime)}`,
         `OmO：${s.agent}${s.pane ? ` @ ${s.pane}` : ""} — ${s.status}`,
-        `目录：${s.cwd}`,
-        `会话文件：${s.session}`,
+        `目录：${codeSpan(s.cwd)}`,
+        `会话文件：${codeSpan(s.session)}`,
         s.queue ? `队列：${s.queue} 条` : "队列：空",
-        `上一条消息：${s.last}`,
+        `上一条消息：${localStamp(s.last)}`,
       ].join("\n"),
     handleFailed: (msg) => `桥接出错：${msg}`,
     unsupported: (type) => `只支持文本消息，收到的是 ${type}。图片和文件没法交给 OmO。`,
@@ -240,12 +275,12 @@ const TEXT = {
     notAborting: "🛑 Nothing is running.",
     status: (s) =>
       [
-        `🟢 Bridge connected, up ${Math.round(s.uptime / 60)} min`,
+        `🟢 Bridge connected, up ${formatUptime(s.uptime)}`,
         `OmO: ${s.agent}${s.pane ? ` @ ${s.pane}` : ""} — ${s.status}`,
-        `Directory: ${s.cwd}`,
-        `Session file: ${s.session}`,
+        `Directory: ${codeSpan(s.cwd)}`,
+        `Session file: ${codeSpan(s.session)}`,
         s.queue ? `Queue: ${s.queue} message(s)` : "Queue: empty",
-        `Last message: ${s.last}`,
+        `Last message: ${localStamp(s.last)}`,
       ].join("\n"),
     handleFailed: (msg) => `Bridge error: ${msg}`,
     unsupported: (type) => `Text messages only — this one was "${type}". Images and files cannot be handed to OmO.`,
@@ -1149,10 +1184,10 @@ async function handle(msg) {
           agent: AGENT,
           pane: info?.pane_id ?? null,
           status: info?.agent_status ?? "unresolved",
-          cwd: info?.cwd ?? "—",
-          session: session?.path ?? "—",
+          cwd: info?.cwd ?? null,
+          session: session?.path ?? null,
           queue: queue.length,
-          last: state.last_inbound_at ? state.last_inbound_at.replace("T", " ").slice(0, 19) : "none yet",
+          last: state.last_inbound_at,
         }),
       );
       await finish(true);
