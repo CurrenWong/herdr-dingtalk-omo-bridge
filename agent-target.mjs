@@ -1,14 +1,18 @@
 /**
- * Which Herdr agent should receive a message.
+ * Which Herdr agent should receive a message, and how to ask the user when the
+ * answer is not obvious.
  *
  * Herdr names are per-agent-instance and are not remembered across restarts: a
  * fresh OmO pane comes up as `pi` again, so a bridge configured for `dingtalk`
- * suddenly has nowhere to send. That is not an error worth failing on — but it
- * is worth being careful about, because the failure mode of guessing wrong is
- * typing a stranger's prompt into someone else's session.
+ * suddenly has nowhere to send. That is not worth failing on — but it is worth
+ * being careful about, because the failure mode of guessing wrong is typing a
+ * stranger's prompt into someone else's session.
  *
  * So: use the named agent when it exists; otherwise adopt the only agent, and
- * only when there is exactly one. With two or more there is no safe guess.
+ * only when there is exactly one. With several, ask.
+ *
+ * Everything here is data in, data out — no user-facing strings. The bridge
+ * owns those so it can speak either language.
  */
 
 export function selectAgent(agents, wanted) {
@@ -23,21 +27,41 @@ export function selectAgent(agents, wanted) {
 }
 
 /**
- * A line for the log or the chat, explaining what happened and what to do.
- * Deliberately names the fix: the rename is not something a user discovers by
- * staring at "agent not found".
+ * The candidates, numbered from 1, with enough detail to tell two OmO windows
+ * apart. Two panes can share a title and a working directory — the only thing
+ * that reliably differs is the pane id, and the only thing the user can see from
+ * outside is which one has focus. Offer both.
  */
-export function describeMiss(reason, wanted, agents) {
-  const names = (Array.isArray(agents) ? agents : [])
-    .map((a) => `${a.agent}${a.name ? `/${a.name}` : ""}`)
-    .filter(Boolean);
+export function agentChoices(agents) {
+  return (Array.isArray(agents) ? agents : [])
+    .filter((a) => a?.pane_id)
+    .map((a, i) => ({
+      n: i + 1,
+      pane: a.pane_id,
+      label: a.terminal_title_stripped || a.terminal_title || a.name || a.agent || "",
+      cwd: a.cwd ?? "",
+      status: a.agent_status ?? "",
+      focused: a.focused === true,
+    }));
+}
 
-  if (reason === "ambiguous") {
-    return `找到 ${names.length} 个 agent（${names.join(", ")}），没有叫「${wanted}」的，无法确定投给谁。` +
-      `请运行 herdr agent rename <pane_id> ${wanted}，或把 LAB_TARGET_AGENT 设成其中一个名字。`;
-  }
-  if (reason === "none") {
-    return "Herdr 里没有任何 agent。先在一个 pane 里启动 omo，再发消息。";
-  }
-  return `找不到 Herdr agent「${wanted}」。`;
+/**
+ * How long a numbered list stays answerable. Long enough to read it and reply,
+ * short enough that a stray "1" days later cannot silently rename a pane.
+ */
+export const CHOICE_TTL_MS = 5 * 60 * 1000;
+
+/**
+ * Read a reply to the numbered list.
+ *
+ * Only a bare number counts — anything else is ordinary chat and must be left
+ * alone, because "2026" or "1 号文件" as a prompt is entirely plausible.
+ */
+export function parseChoice(raw, count) {
+  const s = String(raw ?? "").trim();
+  if (!/^\d{1,2}$/.test(s)) return { kind: "none" };
+
+  const n = Number(s);
+  if (!Number.isInteger(n) || n < 1 || n > count) return { kind: "out-of-range", value: n };
+  return { kind: "pick", index: n - 1, value: n };
 }

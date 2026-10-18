@@ -23,7 +23,7 @@ import { DWClient, TOPIC_ROBOT } from "dingtalk-stream";
 import { saveAttachment } from "./attachments.mjs";
 import { ACTIONS, classifyInbound } from "./inbound.mjs";
 import { assistantMessagesSince, lastAssistantText } from "./session-log.mjs";
-import { describeMiss, selectAgent } from "./agent-target.mjs";
+import { CHOICE_TTL_MS, agentChoices, parseChoice, selectAgent } from "./agent-target.mjs";
 import { DEFAULT_PLUGIN_ID, defaultConfigDir, defaultStateDir } from "./herdr-paths.mjs";
 
 const HERDR = process.env.HERDR_BIN_PATH ?? "herdr";
@@ -61,6 +61,18 @@ const TEXT = {
     timeout: (s) => `⏱ OmO 在 ${s} 秒内没有给出回答。`,
     unauthorized: (id) => `未授权的发送者：${id}`,
     noAgent: (name) => `找不到 Herdr agent「${name}」，桥不知道该把消息投到哪里。`,
+    choiceHeader: (n, name) => `找到 ${n} 个 OmO，没有叫「${name}」的。回复数字，我把它改名为 ${name}：`,
+    choiceLine: ({ n, pane, label, cwd, status, focused }) =>
+      `${n}. ${pane}${label ? ` · ${label}` : ""}${status ? `  [${status}]` : ""}${focused ? "  ← 当前焦点" : ""}${cwd ? `\n     ${cwd}` : ""}`,
+    choiceFooter: "（5 分钟内有效；改完请重发刚才的消息）",
+    choiceInvalid: (max) => `没有这个编号，只有 1–${max}。`,
+    choiceNone: "没有任何 OmO 在跑。先在一个 pane 里启动 omo，再发消息。",
+    choiceExpired: "选择已过期，请重发刚才的消息。",
+    renameOk: ({ pane, label, name }) => `✅ 已把 ${pane}${label ? `（${label}）` : ""} 改名为 ${name}。请重发刚才的消息。`,
+    renameFailed: (err) => `❌ 改名失败：${err}`,
+    ambiguous: (names, name, paneHint) =>
+      `找到 ${names.length} 个 agent（${names.join(", ")}），没有叫「${name}」的，无法确定投给谁。` +
+      `请运行 herdr agent rename ${paneHint} ${name}，或把 LAB_TARGET_AGENT 设成其中一个名字。`,
     busy: "上一条还在处理中，稍等。",
     handleFailed: (msg) => `桥接出错：${msg}`,
     unsupported: (type) => `只支持文本消息，收到的是 ${type}。图片和文件没法交给 OmO。`,
@@ -76,6 +88,18 @@ const TEXT = {
     timeout: (s) => `⏱ OmO did not answer within ${s}s.`,
     unauthorized: (id) => `Unauthorized sender: ${id}`,
     noAgent: (name) => `Herdr agent "${name}" not found — the bridge has nowhere to send this.`,
+    choiceHeader: (n, name) => `Found ${n} OmO windows and none is named "${name}". Reply with a number and I'll rename it to ${name}:`,
+    choiceFooter: "(valid for 5 minutes — resend your message afterwards)",
+    choiceInvalid: (max) => `No such number — it goes up to ${max}.`,
+    choiceNone: "No OmO is running. Start omo in a pane first.",
+    choiceLine: ({ n, pane, label, cwd, status, focused }) =>
+      `${n}. ${pane}${label ? ` · ${label}` : ""}${status ? `  [${status}]` : ""}${focused ? "  ← focused" : ""}${cwd ? `\n     ${cwd}` : ""}`,
+    choiceExpired: "That choice expired — please resend your message.",
+    renameOk: ({ pane, label, name }) => `✅ Renamed ${pane}${label ? ` (${label})` : ""} to ${name}. Resend your message.`,
+    renameFailed: (err) => `❌ Rename failed: ${err}`,
+    ambiguous: (names, name, paneHint) =>
+      `Found ${names.length} agents (${names.join(", ")}) and none is named "${name}", so there is no safe guess. ` +
+      `Run herdr agent rename ${paneHint} ${name}, or set LAB_TARGET_AGENT to one of those names.`,
     busy: "Still working on the previous message.",
     handleFailed: (msg) => `Bridge error: ${msg}`,
     unsupported: (type) => `Text messages only — this one was "${type}". Images and files cannot be handed to OmO.`,
@@ -143,6 +167,11 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // Why the last agentInfo() call found nothing, so the reply can explain it.
 let lastMiss = null;
 
+// The numbered list we last sent when the agent name was ambiguous, so a reply
+// of "2" can be matched back to a pane. Cleared once used, answered, expired, or
+// when the user says something that is not a number.
+let pendingChoice = null;
+
 function agentInfo() {
   let agents = [];
   try {
@@ -167,6 +196,41 @@ function agentInfo() {
 
 function agentPaneId() {
   return agentInfo()?.pane_id ?? TARGET ?? null;
+}
+
+/**
+ * Nothing to send to. Say what does exist, and when the answer is genuinely a
+ * choice, offer the choice: "not found" plus a command to go type somewhere
+ * else is a problem handed back rather than solved.
+ */
+async function explainNoAgent(msg, miss) {
+  if (!miss || miss.reason === "single" || miss.reason === "named") {
+    // "single" can only reach here if the pane vanished between two calls.
+    await push(msg.sessionWebhook, t("noAgent", AGENT));
+    return;
+  }
+
+  if (miss.reason === "none") {
+    await push(msg.sessionWebhook, t("choiceNone"));
+    return;
+  }
+
+  const choices = agentChoices(miss.agents);
+  if (choices.length < 2) {
+    await push(msg.sessionWebhook, t("noAgent", AGENT));
+    return;
+  }
+
+  pendingChoice = { agents: choices, at: Date.now() };
+  log("ambiguous agent", JSON.stringify({ count: choices.length, panes: choices.map((c) => c.pane) }));
+
+  await push(msg.sessionWebhook, [
+    t("choiceHeader", choices.length, AGENT),
+    "",
+    ...choices.map((c) => t("choiceLine", c)),
+    "",
+    t("choiceFooter"),
+  ].join("\n"));
 }
 
 // OmO's session directory name is a slug of the cwd; rather than reproduce the
@@ -464,14 +528,51 @@ async function handle(msg) {
     await tag(msgId, convId, ok ? TAG_DONE : TAG_ERROR);
   };
 
+  // A bare number answering our "which OmO?" list. Resolved before anything is
+  // sent to an agent, or the digit itself would become the prompt.
+  if (pendingChoice) {
+    const pick = parseChoice(verdict.text, pendingChoice.agents.length);
+
+    if (Date.now() - pendingChoice.at >= CHOICE_TTL_MS) {
+      pendingChoice = null;
+      await push(msg.sessionWebhook, t("choiceExpired"));
+      await finish(false);
+      return;
+    }
+
+    if (pick.kind === "pick") {
+      const chosen = pendingChoice.agents[pick.index];
+      pendingChoice = null;
+      log("renaming agent", JSON.stringify(chosen));
+      try {
+        herdr(["agent", "rename", chosen.pane, AGENT]);
+        await push(msg.sessionWebhook, t("renameOk", { ...chosen, name: AGENT }));
+        await finish(true);
+      } catch (err) {
+        log("!! rename failed", err.message);
+        await push(msg.sessionWebhook, t("renameFailed", err.message));
+        await finish(false);
+      }
+      return;
+    }
+
+    if (pick.kind === "out-of-range") {
+      // Keep the list answerable — a typo should not cost the user the whole
+      // exchange.
+      await push(msg.sessionWebhook, t("choiceInvalid", pendingChoice.agents.length));
+      await finish(false);
+      return;
+    }
+
+    // Not a number at all: forget the list and treat this as a normal message.
+    log("choice abandoned", JSON.stringify({ text: verdict.text }));
+    pendingChoice = null;
+  }
+
   const info = agentInfo();
   const paneId = info?.pane_id ?? agentPaneId();
   if (!paneId) {
-    // Say which agents do exist and how to point the bridge at one — "not
-    // found" alone leaves the user guessing at an invisible rename.
-    await push(msg.sessionWebhook, lastMiss
-      ? describeMiss(lastMiss.reason, AGENT, lastMiss.agents)
-      : t("noAgent", AGENT));
+    await explainNoAgent(msg, lastMiss);
     await finish(false);
     return;
   }
