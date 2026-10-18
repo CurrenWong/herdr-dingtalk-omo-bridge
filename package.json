@@ -27,6 +27,7 @@
     "inbound.mjs",
     "probe.mjs",
     "probe-emotion.mjs",
+    "process-state.mjs",
     "session-log.mjs",
     "slash.mjs",
     "startup.mjs",
