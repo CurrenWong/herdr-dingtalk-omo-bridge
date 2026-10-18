@@ -180,7 +180,7 @@ const TEXT = {
     compactNotice: "⏳ /compact 在跑，要调一次模型做摘要，可能要一分钟…",
     compactFailed: (reason) => `压缩没成功：${reason}`,
     busy: "上一条还在处理中，稍等。",
-    queued: (n) => `📥 已排队，前面还有 ${n - 1} 条，处理完就轮到。`,
+    queued: (ahead) => `📥 已排队，前面还有 ${ahead} 条，处理完就轮到。`,
     queueFull: (max) => `📥 队列满了（最多 ${max} 条），这条没接上——等它处理完请重发。`,
     aborted: (dropped) => `🛑 已打断。${dropped ? `顺带丢掉了队列里的 ${dropped} 条。` : ""}`,
     notAborting: "🛑 现在没有在跑的任务。",
@@ -268,7 +268,7 @@ const TEXT = {
     compactNotice: "⏳ /compact is running — it makes a model call to summarise, so this takes a minute or so…",
     compactFailed: (reason) => `Compaction did not run: ${reason}`,
     busy: "Still working on the previous message.",
-    queued: (n) => `📥 Queued — ${n - 1} ahead of it, it runs when those finish.`,
+    queued: (ahead) => `📥 Queued — ${ahead} ahead of it, it runs when those finish.`,
     queueFull: (max) => `📥 The queue is full (${max} max), so this one was not taken. Send it again once things settle.`,
     aborted: (dropped) => `🛑 Interrupted.${dropped ? ` Also dropped ${dropped} queued message(s).` : ""}`,
     notAborting: "🛑 Nothing is running.",
@@ -1365,7 +1365,10 @@ client.registerCallbackListener(TOPIC_ROBOT, (res) => {
     }
 
     queue.push(msg);
-    await push(msg.sessionWebhook, t("queued", queue.length));
+    // A count of zero is not a queue, it is just "after the turn that is
+    // running" — and the 👌Received tag already says the message arrived. Only a
+    // real backlog is worth a message back.
+    if (queue.length > 1) await push(msg.sessionWebhook, t("queued", queue.length - 1));
     await tag(msgId, convId, TAG_RECEIVED);
     log("queued", JSON.stringify({ depth: queue.length, msgId }));
 
