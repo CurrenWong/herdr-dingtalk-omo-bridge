@@ -2,22 +2,27 @@ name: Publish to npm
 
 # Manual only. Publishing is a deliberate act, so this never fires on push.
 #
-# Auth: NPM_TOKEN (a granular access token with "read and write" for this
-# package, stored as a repository secret).
+# Auth and publishing model:
 #
-# Why not OIDC trusted publishing? npm only lets you configure a trusted
-# publisher on a package that already exists — and for a package that has never
-# been published there is no settings page to configure. So the *first* release
-# has to go out with a token. Once the package exists:
-#   npmjs.com → the package → Settings → Trusted Publishing → add this repo and
-#   this workflow file. After that the token is optional; v2 can switch to OIDC
-#   (permissions: id-token: write; npm publish --provenance) and the secret can
-#   be deleted.
+# `npm stage publish`, not `npm publish`. This account has 2FA enabled, and npm
+# is winding down tokens that bypass it, so a token can no longer publish
+# directly — it returns 403. Staging does not need proof-of-presence; it uploads
+# the tarball to a queue. A maintainer then approves it on npmjs.com (or with
+# `npm stage approve <id> --otp <code>`), and only then is it installable.
+#
+# Consequence worth knowing: CI can therefore run unattended, but a release is
+# not live until someone approves it. `npm view <pkg>@<version>` keeps returning
+# 404 until that happens.
+#
+# OIDC trusted publishing is deliberately not used yet: npm only lets you attach
+# a trusted publisher to a package that already exists, and this one had never
+# been published. Once it exists, add one on npmjs.com (package → Settings →
+# Trusted Publishing, limited to this workflow) and the token can go away.
 on:
   workflow_dispatch:
     inputs:
       dry_run:
-        description: "Pack and verify only, do not publish"
+        description: "Pack and verify only, do not stage"
         type: boolean
         default: false
 
@@ -26,7 +31,7 @@ permissions:
 
 jobs:
   publish:
-    name: ${{ inputs.dry_run && 'dry run' || 'publish' }}
+    name: ${{ inputs.dry_run && 'dry run' || 'stage for approval' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -78,8 +83,14 @@ jobs:
           fi
           echo "NPM_TOKEN is present (${#NPM_TOKEN} chars)"
 
-      - name: Publish
+      - name: Stage for approval
         if: ${{ !inputs.dry_run }}
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: npm publish --access public
+        run: |
+          npm stage publish --access public
+          echo ""
+          echo "Staged, not live. Approve it with 2FA to publish:"
+          echo "  npm stage list"
+          echo "  npm stage approve <stage-id> --otp <code>"
+          echo "  — or on npmjs.com, which handles the 2FA prompt in the browser."
