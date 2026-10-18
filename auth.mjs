@@ -9,7 +9,7 @@
 // ./state/auth/ and the credentials are written to the plugin config dir as .env
 // so the bridge picks them up on its next start.
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { DEFAULT_PLUGIN_ID, defaultConfigDir } from "./herdr-paths.mjs";
 
@@ -101,17 +101,52 @@ function resolveConfigDir() {
   return defaultConfigDir(id);
 }
 
+// A credential pasted into a `KEY=value` line can carry a newline — which would
+// turn the rest of it into extra assignments, overriding whatever the bridge
+// reads next. DingTalk ids and secrets are [A-Za-z0-9._-], so anything else is
+// either corruption or an injection attempt.
+const CREDENTIAL_VALUE = /^[A-Za-z0-9._-]+$/;
+const ENV_HEADER = "# written by auth.mjs — DingTalk bot registration (device flow)";
+
 function writeEnv(clientId, clientSecret) {
+  const pairs = [
+    ["DINGTALK_CLIENT_ID", clientId],
+    ["DINGTALK_CLIENT_SECRET", clientSecret],
+  ];
+  for (const [name, value] of pairs) {
+    if (typeof value !== "string" || !CREDENTIAL_VALUE.test(value)) {
+      throw new Error(`${name} has characters that cannot be written to .env safely`);
+    }
+  }
+
   const dir = resolveConfigDir();
-  mkdirSync(dir, { recursive: true });
+  // 0700 / 0600 where the platform honours it (it does not on Windows, where the
+  // ACL of the parent is what counts). A secret readable by every local user is
+  // not a secret.
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
   const envPath = join(dir, ".env");
-  const body = [
-    "# written by auth.mjs — DingTalk bot registration (device flow)",
-    `DINGTALK_CLIENT_ID=${clientId}`,
-    `DINGTALK_CLIENT_SECRET=${clientSecret}`,
-    "",
-  ].join("\n");
-  writeFileSync(envPath, body, "utf8");
+
+  // Replace only the two keys this process owns. The previous version wrote a
+  // fresh file, silently deleting anything else the user had configured there.
+  const pending = new Map(pairs);
+  const lines = [];
+  let existing = "";
+  try {
+    existing = readFileSync(envPath, "utf8");
+  } catch {}
+  for (const line of existing.split("\n")) {
+    const key = /^\s*([A-Za-z0-9_]+)\s*=/.exec(line)?.[1];
+    if (key && pending.has(key)) {
+      lines.push(`${key}=${pending.get(key)}`);
+      pending.delete(key);
+    } else if (line.trim()) {
+      lines.push(line);
+    }
+  }
+  if (!lines.includes(ENV_HEADER)) lines.unshift(ENV_HEADER);
+  for (const [key, value] of pending) lines.push(`${key}=${value}`);
+
+  writeFileSync(envPath, `${lines.join("\n")}\n`, { encoding: "utf8", mode: 0o600 });
   log("credentials written to", envPath);
   return envPath;
 }
@@ -172,7 +207,9 @@ async function main() {
           null,
           2,
         ),
-        "utf8",
+        // Documented as a plaintext copy (README), which is a deliberate
+        // trade-off — but it is still a secret, so keep it owner-only.
+        { encoding: "utf8", mode: 0o600 },
       );
       writeStatus("success", { client_id: clientId, env_path: envPath });
       log("SUCCESS — credentials issued and stored");

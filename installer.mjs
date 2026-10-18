@@ -15,7 +15,7 @@
 import { spawnSync } from "node:child_process";
 import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const MARKER = "installed by herdr-dingtalk-omo-bridge";
@@ -182,6 +182,17 @@ function install(opts) {
   return 0;
 }
 
+// A marker that merely exists is not proof: `--dir` can point anywhere, and any
+// directory holding a file of that name would then be recursively force-deleted.
+// Check what the file says before treating the directory as ours.
+function isOurs(dir) {
+  try {
+    return readFileSync(join(dir, ".installed-by"), "utf8").startsWith(MARKER);
+  } catch {
+    return false;
+  }
+}
+
 function uninstall(opts) {
   const root = resolve(opts.dir ?? defaultInstallRoot());
   const removed = [];
@@ -189,13 +200,15 @@ function uninstall(opts) {
   if (existsSync(root)) {
     for (const name of readdirSync(root)) {
       const dir = join(root, name);
-      if (!existsSync(join(dir, ".installed-by"))) continue;
+      if (!isOurs(dir)) continue;
       removed.push(dir);
-      if (!opts.dryRun) rmSync(dir, { recursive: true, force: true });
     }
   }
 
-  const linked = linkedPaths().filter((p) => p.startsWith(root));
+  // A path-component boundary, not a string prefix: `<root>-backup` shares the
+  // prefix but is a different directory, and unlinking on that match only made
+  // noise.
+  const linked = linkedPaths().filter((p) => p === root || p.startsWith(root + sep));
   const plan = {
     root,
     directories: removed,
@@ -214,11 +227,15 @@ function uninstall(opts) {
   }
 
   // Unregister before deleting, so Herdr never points at a missing directory.
+  // The old order deleted during the scan above and then printed this comment.
   for (const p of linked) {
     const r = herdr(["plugin", "unlink", PLUGIN_ID]);
     if (!r.ok && r.err) console.log(`  herdr unlink: ${r.err}`);
   }
-  for (const d of removed) console.log(`  removed ${d}`);
+  for (const d of removed) {
+    rmSync(d, { recursive: true, force: true });
+    console.log(`  removed ${d}`);
+  }
 
   // Leave no empty root behind, but never delete a directory that still holds
   // something we did not put there.

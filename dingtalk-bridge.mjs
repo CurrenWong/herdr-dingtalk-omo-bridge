@@ -16,7 +16,7 @@
 // spawns node/bun children, so Herdr sees "agent is no longer the pane
 // foreground process". Raw pane input plus a lifecycle poll works.
 import { spawnSync } from "node:child_process";
-import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve as resolvePath } from "node:path";
 import { DWClient, TOPIC_ROBOT } from "dingtalk-stream";
@@ -429,6 +429,52 @@ async function explainNoAgent(msg, miss) {
 
 // OmO's session directory name is a slug of the cwd; rather than reproduce the
 // slug rule, read each session's first JSONL row (it carries `cwd`) and match.
+//
+// This runs on every poll of an active turn — about once a second — and the
+// first row is all it needs. Reading each log in full to get one line meant
+// tens of megabytes of synchronous I/O per poll, which blocks the event loop
+// and starves the Stream connection's own traffic. Only the head of each file
+// is read, and the parse is cached against its size and mtime.
+const HEAD_BYTES = 8192;
+const headCache = new Map();
+
+function firstRowOf(file) {
+  let st;
+  try {
+    st = statSync(file);
+  } catch {
+    return null;
+  }
+
+  const hit = headCache.get(file);
+  if (hit && hit.size === st.size && hit.mtimeMs === st.mtimeMs) return hit;
+
+  let row = null;
+  let fd = null;
+  try {
+    fd = openSync(file, "r");
+    const buf = Buffer.allocUnsafe(HEAD_BYTES);
+    const n = readSync(fd, buf, 0, HEAD_BYTES, 0);
+    const head = buf.subarray(0, n).toString("utf8");
+    // A first row larger than the window would be cut mid-JSON; that is not a
+    // shape these files have, but parse failure must not invent a match.
+    const first = head.split("\n", 1)[0];
+    row = JSON.parse(first);
+  } catch {
+    row = null;
+  } finally {
+    if (fd !== null) {
+      try {
+        closeSync(fd);
+      } catch {}
+    }
+  }
+
+  const entry = { row, size: st.size, mtimeMs: st.mtimeMs };
+  headCache.set(file, entry);
+  return entry;
+}
+
 function sessionFileForCwd(cwd) {
   if (!existsSync(OMO_SESSIONS)) return null;
   const want = resolvePath(cwd ?? "").toLowerCase();
@@ -438,16 +484,12 @@ function sessionFileForCwd(cwd) {
     for (const name of readdirSync(join(OMO_SESSIONS, dir.name))) {
       if (!name.endsWith(".jsonl")) continue;
       const file = join(OMO_SESSIONS, dir.name, name);
-      let first;
-      try {
-        first = JSON.parse(readFileSync(file, "utf8").split("\n", 1)[0]);
-      } catch {
-        continue;
+      const head = firstRowOf(file);
+      if (!head?.row?.cwd) continue;
+      if (resolvePath(head.row.cwd).toLowerCase() !== want) continue;
+      if (!best || head.mtimeMs > best.mtimeMs) {
+        best = { path: file, size: head.size, mtimeMs: head.mtimeMs };
       }
-      if (!first?.cwd) continue;
-      if (resolvePath(first.cwd).toLowerCase() !== want) continue;
-      const st = statSync(file);
-      if (!best || st.mtimeMs > best.mtimeMs) best = { path: file, size: st.size, mtimeMs: st.mtimeMs };
     }
   }
   return best;
@@ -498,6 +540,13 @@ function savePending(webhook, text) {
 
 // DingTalk markdown messages require a title — omitting it fails with
 // 400402 "miss param : markdown->title", and the webhook still answers HTTP 200.
+//
+// Delivery is verified, not assumed: a 429/500 or an HTML error page used to
+// parse to a string, leave `errcode` undefined, and be recorded as delivered
+// while the phone got nothing. A hung socket had no timeout either, so it
+// stalled the whole queue behind one request.
+const PUSH_TIMEOUT_MS = 15000;
+
 async function push(webhook, text) {
   if (!webhook) return;
   state.last_push = { at: new Date().toISOString(), text: text.slice(0, 200) };
@@ -513,24 +562,30 @@ async function push(webhook, text) {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ msgtype: "markdown", markdown: { title, text } }),
+      signal: AbortSignal.timeout(PUSH_TIMEOUT_MS),
     });
     const body = await res.text();
-    let parsed;
+    let parsed = null;
     try {
       parsed = JSON.parse(body);
     } catch {
-      parsed = body;
+      parsed = null;
     }
-    if (parsed?.errcode) {
-      log("!! webhook rejected", JSON.stringify(parsed));
+    // DingTalk answers 200 with `{errcode:0}` on success; anything else — a
+    // non-2xx, a non-JSON body, a missing errcode — is a reply the user did not
+    // receive, whatever the status line says.
+    const delivered = res.ok && parsed && typeof parsed === "object" && parsed.errcode === 0;
+    if (!delivered) {
+      log("!! webhook rejected", JSON.stringify({ status: res.status, body: body.slice(0, 200) }));
       savePending(webhook, text);
     } else {
       log("webhook ok", JSON.stringify(parsed).slice(0, 200));
     }
-    state.last_push.ok = !parsed?.errcode;
+    state.last_push.ok = Boolean(delivered);
   } catch (err) {
     log("!! webhook failed", err.message);
     savePending(webhook, text);
+    state.last_push.ok = false;
   }
 }
 
