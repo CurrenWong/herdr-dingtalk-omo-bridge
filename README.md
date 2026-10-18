@@ -1,7 +1,18 @@
 # herdr-dingtalk-omo-bridge
 
+[![npm version](https://img.shields.io/npm/v/herdr-dingtalk-omo-bridge)](https://www.npmjs.com/package/herdr-dingtalk-omo-bridge)
+[![npm downloads](https://img.shields.io/npm/dw/herdr-dingtalk-omo-bridge)](https://www.npmjs.com/package/herdr-dingtalk-omo-bridge)
+[![CI](https://github.com/CurrenWong/herdr-dingtalk-omo-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/CurrenWong/herdr-dingtalk-omo-bridge/actions/workflows/ci.yml)
+[![license](https://img.shields.io/github/license/CurrenWong/herdr-dingtalk-omo-bridge)](LICENSE)
+
 A [Herdr](https://herdr.dev) plugin that makes an **OmO** coding agent reachable
 from DingTalk — and tells you, on the message itself, what state it is in.
+
+```bash
+npx herdr-dingtalk-omo-bridge@latest install
+# or
+herdr plugin install CurrenWong/herdr-dingtalk-omo-bridge
+```
 
 Send a message in DingTalk:
 
