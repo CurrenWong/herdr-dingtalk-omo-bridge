@@ -36,9 +36,15 @@ export function rowsAppendedSince(file, fromByte) {
  * The assistant's answer among the rows appended since `fromByte`, or null if
  * the turn has not produced one yet.
  *
- * Requires the user row to be present first: without that guard, a poll that
- * runs before the agent has recorded the prompt can match a leftover assistant
- * row and declare the turn finished.
+ * Two guards, each for a failure that actually happened:
+ *
+ *  * the user row must be present, or a poll that outraces the agent can match a
+ *    leftover assistant row and call the turn finished;
+ *  * an assistant row that carries anything other than text is *not* an answer.
+ *    OmO narrates before it acts — "I need to extract text from the PDF, I'll
+ *    use Python" arrives as an assistant message bundled with the toolCall that
+ *    follows it. Accepting that reported the plan as the result, 70 seconds
+ *    before the real answer existed.
  */
 export function lastAssistantText(file, fromByte) {
   const rows = rowsAppendedSince(file, fromByte);
@@ -50,9 +56,23 @@ export function lastAssistantText(file, fromByte) {
   let answer = null;
   for (const row of rows) {
     if (row.type !== "message" || row.message?.role !== "assistant") continue;
-    const parts = (row.message.content ?? [])
-      .filter((c) => c.type === "text" && c.text)
-      .map((c) => c.text.trim());
+
+    const content = row.message.content;
+    if (typeof content === "string") {
+      if (content.trim()) answer = content.trim();
+      continue;
+    }
+    if (!Array.isArray(content)) continue;
+
+    // Any toolCall/tool_result-ish part means the agent is still working: this
+    // is narration, not a conclusion.
+    const stillActing = content.some((c) => typeof c !== "string" && (c?.type ?? "") !== "text");
+    if (stillActing) continue;
+
+    const parts = content
+      .map((c) => (typeof c === "string" ? c : c.text))
+      .filter((t) => typeof t === "string" && t.trim())
+      .map((t) => t.trim());
     if (parts.length) answer = parts.join("\n\n");
   }
   return answer;

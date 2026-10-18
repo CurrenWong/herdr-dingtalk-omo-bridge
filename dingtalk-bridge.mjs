@@ -42,6 +42,9 @@ const OMO_SESSIONS = join(homedir(), ".omo", "agent", "sessions");
 // state dir: the agent opens them by path, and a relative path in its own
 // workspace is the least surprising thing to hand it.
 const ATTACHMENT_DIR = process.env.LAB_ATTACHMENT_DIR ?? ".dingtalk-inbox";
+// One DingTalk markdown message comfortably carries a few thousand characters;
+// beyond this the tail is cut and the reply says so.
+const PUSH_LIMIT = Number(process.env.LAB_PUSH_LIMIT ?? 4000);
 
 // Every string the bot says to the user lives here so the plugin is not welded
 // to one language. Set LAB_LANG=en for English; anything else falls back to the
@@ -60,6 +63,7 @@ const TEXT = {
     attachmentPrompt: ({ type, path, size }) =>
       `用户通过钉钉发来一个 ${type} 附件，已保存到本地：\n${path}\n（${size}）\n\n请查看这个文件并回应。如果无法直接读取其中的内容，请说明原因，不要猜测。`,
     attachmentFailed: (err) => `附件下载失败：${err}`,
+    truncated: (n) => `…（内容过长，已截断剩余 ${n} 字符）`,
   },
   en: {
     fallbackTitle: "Reply",
@@ -73,6 +77,7 @@ const TEXT = {
     attachmentPrompt: ({ type, path, size }) =>
       `The user sent a ${type} attachment through DingTalk. It is saved locally at:\n${path}\n(${size})\n\nPlease look at it and respond. If you cannot actually read its contents, say so rather than guessing.`,
     attachmentFailed: (err) => `Could not download the attachment: ${err}`,
+    truncated: (n) => `…(${n} more characters truncated)`,
   },
 };
 const t = (key, ...args) => TEXT[LANG][key](...args);
@@ -348,7 +353,11 @@ async function askAgent(paneId, text, cwd) {
       const fresh = sessionFileForCwd(cwd);
       const file = fresh && fresh.path !== snap.path ? fresh : snap;
       const answer = lastAssistantText(file, snap.path === file.path ? snap.size : 0);
-      if (answer) {
+      // While the agent is still "working", its latest text is commentary on
+      // what it is about to do, not a conclusion. The structural check inside
+      // lastAssistantText catches the common case (narration bundled with a
+      // toolCall); this also catches narration sent as its own text-only row.
+      if (answer && info?.agent_status !== "working") {
         log("answer from session log", JSON.stringify(answer.slice(0, 300)));
         return { text: answer, ok: true };
       }
@@ -449,7 +458,11 @@ async function handle(msg) {
   }
 
   const answer = await askAgent(paneId, promptText, info?.cwd);
-  await push(msg.sessionWebhook, answer.text.slice(0, 4000));
+  // Truncating silently would look like the agent stopped mid-sentence.
+  const body = answer.text.length > PUSH_LIMIT
+    ? `${answer.text.slice(0, PUSH_LIMIT)}\n\n${t("truncated", answer.text.length - PUSH_LIMIT)}`
+    : answer.text;
+  await push(msg.sessionWebhook, body);
   await finish(answer.ok);
 }
 
