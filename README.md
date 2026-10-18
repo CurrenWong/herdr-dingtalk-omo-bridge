@@ -380,7 +380,7 @@ what the docs claim:
 
 | | Commands | What the bridge does |
 |---|---|---|
-| Verified inline | `/session` `/hotkeys` `/changelog` `/reload` | Runs it, reads the new lines off the screen, replies with them |
+| Verified inline | `/session` `/hotkeys` `/changelog` `/reload` `/compact [instructions]` | Runs it, reads the new lines off the screen, replies with them. `/compact` gets a settle-based wait instead of the short poll, since it makes a model call |
 | Driven picker | `/model`, `/model <term>`, `/sessions`, `/sessions <term>` | See below |
 | Refused — overlay | `/help` (measured: full-screen help), plus `/settings` `/tree` `/fork` `/clone` `/scoped-models` `/keybindings` `/llama` `/copy` `/export` | Refused. A picker left open swallows every following message into its filter |
 | Refused — untested | `/thinking` `/reasoning` `/efforts` `/fast` `/compact` `/new` `/rename` | Refused until someone watches what they actually do |
@@ -401,6 +401,14 @@ Two things worth knowing before using it:
 - The picker is scoped to the **current provider**, so `/model` alone lists that
   provider's models rather than all 43 in the catalog. Switching provider is not
   something the bridge does.
+
+**`/compact`** is inline, with no picker and no confirmation — but expect it to
+refuse most of the time here. Compaction triggers on context size near the
+model's ceiling, not on message count, so it answered `Nothing to compact
+(session too small)` on both a 2-message and a 12-message / 30K-token session in
+a 1M-token window. It fails instantly without a model call. The success report
+has not been observed, so anything that is not the failure line is passed
+through as raw screen text.
 
 Reading the screen back needs care, because a TUI repaints rather than appends
 and the same command run twice produces identical output. The bridge reads the
@@ -612,7 +620,7 @@ If you get it running elsewhere, widening the manifest to
 
 | | 命令 | 桥的做法 |
 |---|---|---|
-| 实测可跑 | `/session` `/hotkeys` `/changelog` `/reload` | 发过去，把屏幕新增内容读回来 |
+| 实测可跑 | `/session` `/hotkeys` `/changelog` `/reload` `/compact [摘要要求]` | 发过去，把屏幕新增内容读回来。`/compact` 要调一次模型，所以用「等屏幕稳定」的等法而不是短轮询 |
 | 驱动选择器 | `/model`、`/model <关键词>`、`/sessions`、`/sessions <关键词>` | 见下 |
 | 拒绝·会弹框 | `/help`（实测是全屏帮助），以及 `/settings` `/tree` `/fork` `/clone` `/scoped-models` `/keybindings` `/llama` `/copy` `/export` | 拒绝。留着选择器，之后每条消息都会被输入进它的搜索框 |
 | 拒绝·未验证 | `/thinking` `/reasoning` `/efforts` `/fast` `/compact` `/new` `/rename` | 在有人看过它真实行为之前一律拒绝 |
@@ -629,6 +637,11 @@ If you get it running elsewhere, widening the manifest to
 - 过滤匹配的是**模型 id**，不是显示名。`deepseek-v4-flash` 搜不到，因为 id 是 `deepseek-flash`。
 - 选择器只列**当前 provider** 的模型，所以 `/model` 看到的是这个 provider 的那几个，不是
   目录里全部 43 个。切换 provider 桥不做。
+
+**`/compact`** 是内联的，没有选择器也没有确认——但别指望它经常成功。压缩是按「上下文接近模型上限」
+触发的，不是按消息条数，所以在 1M 窗口里，2 条消息的会话和 12 条消息 / 30K token 的会话都实测回
+`Nothing to compact (session too small)`，且是秒回、不调模型。成功时的报告长什么样没有观测到，
+所以只要不是那条失败行，就按屏幕原文透传。
 
 读屏还有个坑：TUI 是重绘而不是追加，同一条命令跑两次输出一模一样，按文本比对分不出
 新旧。所以桥读的是回滚缓冲（`--source recent`）而不是视口，旧屏才是新屏的真前缀。

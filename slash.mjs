@@ -34,6 +34,17 @@ export const SLASH = {
 // Verified: prints inline and returns to the editor.
 const SUPPORTED = new Set(["session", "hotkeys", "changelog", "reload"]);
 
+/**
+ * Verified inline, but too slow for the bridge's short wait.
+ *
+ * `/compact` makes a model call to summarise the history, so on a real session it
+ * runs for tens of seconds. The short poll used for the other inline commands
+ * would return a spinner frame and report a truncated answer, so this one gets a
+ * settle-based wait instead. Its optional argument is the summarisation
+ * instruction and is passed through.
+ */
+const SLOW = new Set(["compact"]);
+
 // Needs its picker driven rather than typed at; see parsePickerRows.
 const MODEL = new Set(["model"]);
 
@@ -59,7 +70,6 @@ const INTERACTIVE = new Set([
   "reasoning",
   "efforts",
   "fast",
-  "compact",
   "new",
   "rename",
 ]);
@@ -69,7 +79,7 @@ const INTERACTIVE = new Set([
 const DANGEROUS = new Set(["quit", "exit", "login", "logout", "import", "trust"]);
 
 /**
- * @returns {{kind: string, command: string, arg: string}}
+ * @returns {{kind: string, command: string, arg: string, slow?: boolean}}
  */
 export function classifySlash(text) {
   const raw = String(text ?? "").trim();
@@ -88,10 +98,25 @@ export function classifySlash(text) {
   if (DANGEROUS.has(command)) return { kind: SLASH.DANGEROUS, command, arg };
   if (MODEL.has(command)) return { kind: SLASH.MODEL, command, arg };
   if (SESSIONS.has(command)) return { kind: SLASH.SESSIONS, command, arg };
-  if (SUPPORTED.has(command)) return { kind: SLASH.SUPPORTED, command, arg };
+  if (SUPPORTED.has(command) || SLOW.has(command)) {
+    return { kind: SLASH.SUPPORTED, command, arg, slow: SLOW.has(command) };
+  }
   if (INTERACTIVE.has(command)) return { kind: SLASH.INTERACTIVE, command, arg };
 
   return { kind: SLASH.NONE, command, arg };
+}
+
+/**
+ * The failure line `/compact` prints, measured:
+ *
+ *      Error: Compaction failed: Nothing to compact (session too small)
+ *
+ * Returns the reason, or null when the run did not fail this way — including the
+ * case of a successful compaction, whose report shape is not verified here.
+ */
+export function parseCompactOutcome(out) {
+  const m = String(out ?? "").match(/^[^\S\n]*Error:[^\S\n]*Compaction failed:[^\S\n]*(.+?)[^\S\n]*$/m);
+  return m ? { ok: false, reason: m[1] } : null;
 }
 
 /**

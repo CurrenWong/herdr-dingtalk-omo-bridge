@@ -27,6 +27,7 @@ import { CHOICE_TTL_MS, agentChoices, parseChoice, selectAgent } from "./agent-t
 import {
   SLASH,
   classifySlash,
+  parseCompactOutcome,
   parsePickerRows,
   parseSessionReport,
   parseSessionRows,
@@ -130,6 +131,8 @@ const TEXT = {
     sessionAmbiguous: (term, list) => `「${term}」匹配到多个会话，没有替你选：\n\n${list}\n\n换个更具体的关键词。`,
     sessionResumed: (name, path) => `✅ 已恢复会话：${name}\n   ${path}`,
     sessionStuck: "选择器没有关掉，已按 Escape 退出。",
+    compactNotice: "⏳ /compact 在跑，要调一次模型做摘要，可能要一分钟…",
+    compactFailed: (reason) => `压缩没成功：${reason}`,
     busy: "上一条还在处理中，稍等。",
     handleFailed: (msg) => `桥接出错：${msg}`,
     unsupported: (type) => `只支持文本消息，收到的是 ${type}。图片和文件没法交给 OmO。`,
@@ -203,6 +206,8 @@ const TEXT = {
     sessionAmbiguous: (term, list) => `"${term}" matches several sessions, so nothing was chosen:\n\n${list}\n\nUse a more specific term.`,
     sessionResumed: (name, path) => `✅ Resumed: ${name}\n   ${path}`,
     sessionStuck: "The picker did not close; escaped out.",
+    compactNotice: "⏳ /compact is running — it makes a model call to summarise, so this takes a minute or so…",
+    compactFailed: (reason) => `Compaction did not run: ${reason}`,
     busy: "Still working on the previous message.",
     handleFailed: (msg) => `Bridge error: ${msg}`,
     unsupported: (type) => `Text messages only — this one was "${type}". Images and files cannot be handed to OmO.`,
@@ -564,6 +569,47 @@ async function runPaneCommand(paneId, command) {
   return out;
 }
 
+/**
+ * Run a pane command that takes far longer than the short poll above allows.
+ *
+ * `/compact` summarises the whole history through a model call, which on a real
+ * session runs for tens of seconds — the short poll would come back on a spinner
+ * frame and report a truncated answer as if it were the result.
+ *
+ * A TUI repaints rather than appends, so there is no "the command finished"
+ * marker to wait for. Three consecutive identical buffers plus an uncovered
+ * editor is the same signal the probe used: the spinner keeps the buffer moving,
+ * and the editor check rejects a quiet frame in the middle of the work.
+ */
+async function runPaneCommandSlow(paneId, command, timeoutMs = 240000) {
+  const before = readBuffer(paneId);
+  const payload = command.replace(/\r?\n/g, " ");
+
+  herdr(["pane", "send-text", paneId, payload]);
+  await sleep(300);
+  herdr(["pane", "send-keys", paneId, "enter"]);
+
+  const started = Date.now();
+  let last = "";
+  let stable = 0;
+  let changed = false;
+
+  while (Date.now() - started < timeoutMs) {
+    await sleep(2000);
+    const now = readBuffer(paneId);
+    stable = now === last ? stable + 1 : 0;
+    if (now !== before) changed = true;
+    last = now;
+    if (changed && stable >= 3 && atEditor(readScreen(paneId))) break;
+  }
+
+  const seconds = Math.round((Date.now() - started) / 1000);
+  const out = pickNewLines(before, last);
+  log("pane command output (slow)", JSON.stringify({ command: payload, seconds, chars: out.length }));
+  if (seconds * 1000 >= timeoutMs) log("!! slow pane command hit the timeout", JSON.stringify({ command: payload }));
+  return out;
+}
+
 const readBuffer = (paneId) =>
   stripAnsi(herdr(["pane", "read", paneId, "--source", "recent", "--lines", "400"]));
 
@@ -912,7 +958,9 @@ async function handle(msg) {
       return;
     }
 
-    const out = await runPaneCommand(paneId, verdict.text);
+    if (slash.slow) await push(msg.sessionWebhook, t("compactNotice"));
+
+    const out = slash.slow ? await runPaneCommandSlow(paneId, verdict.text) : await runPaneCommand(paneId, verdict.text);
 
     // /session has a fixed shape, so lay it out instead of echoing the screen.
     // Anything that does not parse falls through to the raw text.
@@ -924,6 +972,13 @@ async function handle(msg) {
         return;
       }
       log("!! /session output did not parse", JSON.stringify(out.slice(0, 200)));
+    }
+
+    const compactFailure = slash.command === "compact" ? parseCompactOutcome(out) : null;
+    if (compactFailure) {
+      await push(msg.sessionWebhook, t("compactFailed", compactFailure.reason));
+      await finish(false);
+      return;
     }
 
     await push(msg.sessionWebhook, out ? t("slashOutput", slash.command, out) : t("slashNoOutput", slash.command));
