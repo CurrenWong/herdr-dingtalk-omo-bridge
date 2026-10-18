@@ -16,7 +16,7 @@
 // spawns node/bun children, so Herdr sees "agent is no longer the pane
 // foreground process". Raw pane input plus a lifecycle poll works.
 import { spawnSync } from "node:child_process";
-import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve as resolvePath } from "node:path";
 import { DWClient, TOPIC_ROBOT } from "dingtalk-stream";
@@ -541,6 +541,31 @@ function savePending(webhook, text) {
   } catch {}
 }
 
+/**
+ * Say something about a reply that never went out, then clear the file.
+ *
+ * The webhook in it has expired by the next start — DingTalk issues them
+ * per-message — so replaying is not an option. But the file used to be written
+ * and never read by anything, which made a lost reply indistinguishable from a
+ * delivered one: this at least names it once, instead of leaving a dead file in
+ * the state directory.
+ */
+function reportPendingPush() {
+  if (!existsSync(pendingPath)) return;
+  try {
+    const p = JSON.parse(readFileSync(pendingPath, "utf8"));
+    log(
+      "!! a reply was never delivered",
+      JSON.stringify({ at: p.at, chars: String(p.text ?? "").length, head: String(p.text ?? "").slice(0, 120) }),
+    );
+  } catch {
+    log("!! pending-push.json is unreadable");
+  }
+  try {
+    unlinkSync(pendingPath);
+  } catch {}
+}
+
 // DingTalk markdown messages require a title — omitting it fails with
 // 400402 "miss param : markdown->title", and the webhook still answers HTTP 200.
 //
@@ -756,6 +781,15 @@ const readScreen = (paneId) =>
 // The editor prompt is the reliable sign that no overlay is covering the frame.
 const atEditor = (screen) => screen.split("\n").some((l) => l.trim() === "❯");
 
+// The model picker's own footer, measured on this build:
+//     enter select ctrl+s select as default ctrl+f favorite
+// "an overlay is open" is not the same as "the picker is open": an approval
+// dialog covers the editor too, and treating it as the picker made /model report
+// an empty model list while the agent was waiting for an answer to something
+// else. Rows count as proof too, in case the footer changes.
+const looksLikeModelPicker = (screen) =>
+  /enter select|ctrl\+s select/i.test(screen) || parsePickerRows(screen).length > 0;
+
 // The pane that most recently answered for the configured agent. There is no other
 // way to find it: Herdr's registry forgets a dead agent, and the name it had is the
 // only handle left.
@@ -817,11 +851,16 @@ async function openModelPicker(paneId) {
   await sleep(300);
   herdr(["pane", "send-keys", paneId, "enter"]);
 
+  let sawOtherOverlay = false;
   for (let i = 0; i < 8; i += 1) {
     await sleep(400);
     const screen = readScreen(paneId);
-    if (!atEditor(screen)) return screen;
+    if (!atEditor(screen)) {
+      if (looksLikeModelPicker(screen)) return screen;
+      sawOtherOverlay = true;
+    }
   }
+  if (sawOtherOverlay) log("!! an overlay is open but it is not the model picker");
   return null;
 }
 
@@ -1057,6 +1096,7 @@ async function askAgent(paneId, text, cwd, onProgress, conv = "") {
   // twice. Capped because DingTalk rate-limits a robot to ~20 messages/minute.
   const narrated = new Set();
   let progressSent = 0;
+  let warnedUnknownStatus = false;
 
   while (Date.now() < deadline) {
     await sleep(900);
@@ -1087,9 +1127,18 @@ async function askAgent(paneId, text, cwd, onProgress, conv = "") {
       // what it is about to do, not a conclusion. The structural check inside
       // lastAssistantText catches the common case (narration bundled with a
       // toolCall); this also catches narration sent as its own text-only row.
-      if (answer && info?.agent_status !== "working") {
+      //
+      // The status has to be *known*. `herdr agent list` failing leaves `info`
+      // null, `info?.agent_status` undefined, and "not working" true by
+      // accident — which let a narration row go out as the answer.
+      const settled = Boolean(info?.agent_status) && info.agent_status !== "working";
+      if (answer && settled) {
         log("answer from session log", JSON.stringify(answer.slice(0, 300)));
         return { text: answer, ok: true };
+      }
+      if (answer && !settled && !info && !warnedUnknownStatus) {
+        warnedUnknownStatus = true;
+        log("answer held back: agent status unavailable", JSON.stringify({ chars: answer.length }));
       }
     } else if (TARGET) {
       const answer = newOutputSince(paneBefore, readPane(paneId));
@@ -1167,10 +1216,19 @@ async function handle(msg) {
     const pick = parseChoice(verdict.text, pendingChoice.agents.length);
 
     if (Date.now() - pendingChoice.at >= CHOICE_TTL_MS) {
+      const wasAnswering = pick.kind !== "none";
       pendingChoice = null;
-      await push(msg.sessionWebhook, t("choiceExpired"));
-      await finish(true);
-      return;
+      if (wasAnswering) {
+        // A digit answered a list that no longer applies. Say so rather than
+        // typing "2" into the agent as a prompt.
+        await push(msg.sessionWebhook, t("choiceExpired"));
+        await finish(true);
+        return;
+      }
+      // Anything else is a new message that happens to arrive after the list went
+      // stale. Replying "expired" and returning swallowed it — the user's actual
+      // request never reached the agent. Fall through and treat it as a prompt.
+      log("choice expired, treating the message as a prompt", JSON.stringify({ text: verdict.text }));
     }
 
     if (pick.kind === "pick") {
@@ -1519,5 +1577,6 @@ process.on("SIGINT", () => {
 
 log("starting bridge", JSON.stringify({ agent: AGENT, target_pane: TARGET, allow: ALLOW.length || "any" }));
 writeState();
+reportPendingPush();
 await client.connect();
 log("connected");
