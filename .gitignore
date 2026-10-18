@@ -17,6 +17,10 @@ state/
 # docs/herdr-notes.md for the URLs.
 # (Anchored to the repo root so it cannot swallow docs/herdr-notes.md.)
 
+# Attachments redeemed from DingTalk land in the agent's working directory,
+# which is usually this repo. They are somebody's files, not source.
+.dingtalk-inbox/
+
 # Editor / OS noise
 .DS_Store
 Thumbs.db

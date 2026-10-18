@@ -351,6 +351,25 @@ herdr pane send-text <pane> <text>
 herdr pane send-keys <pane> enter
 ```
 
+### Attachments
+
+A picture message never carries the image. DingTalk sends a `downloadCode`, and
+the file has to be redeemed in two steps:
+
+```
+POST https://api.dingtalk.com/v1.0/robot/messageFiles/download   { downloadCode, robotCode }
+  -> { downloadUrl }            (short-lived)
+GET  <downloadUrl>              -> bytes
+```
+
+The bridge saves the result into `<agent cwd>/.dingtalk-inbox/` (override with
+`LAB_ATTACHMENT_DIR`) and sends the agent a prompt naming that path, so it can
+open the file with its usual tools. Names are sanitised but keep their script:
+`账单 2026.pdf` survives as `账单_2026.pdf` rather than being reduced to
+`_2026.pdf`.
+
+Files over 20 MB are refused rather than pulled into the workspace.
+
 ### The message tags
 
 These are plain REST calls against the DingTalk emotion API, which needs an app
@@ -443,7 +462,8 @@ node startup.mjs     # with the HERDR_* plugin env vars set
 | Bridge never connects | Another Stream client is already using this app. DingTalk permits exactly one connection per app — check for a second `dingtalk-bridge.mjs`. |
 | Tags never appear | Run `node probe-emotion.mjs <conv-id>`, and confirm the app has the robot capability that allows emotions. |
 | `msg.dec.err` on every tag | The message id was not accepted. Usually a stale or non-robot message. |
-| Reply says "只支持文本消息" / "Text messages only" | Working as intended — the bridge handles text, and OmO cannot receive images or files through the pane. |
+| Reply says "只支持文本消息" / "Text messages only" | The message carried neither text nor a `downloadCode`. Voice notes and rich-text in group chats are the usual cases. |
+| Reply says "附件下载失败" / "Could not download the attachment" | The `downloadCode` was rejected or the download URL expired. `downloadCode`s are single-use and short-lived; check the log line `!! attachment failed`. |
 | `check-reply.mjs` prints "no OmO sessions directory" | OmO is not installed, or has never run on this machine. The bridge reads answers from OmO's session logs, so there is nothing to read yet. |
 
 ## Security notes
@@ -500,9 +520,12 @@ If you get it running elsewhere, widening the manifest to
   conversation; concurrent senders queue rather than run in parallel.
 - **Tied to OmO's session-log format.** Another agent would need its own
   reply-extraction adapter (`sessionFileForCwd` / `lastAssistantText`).
-- **Text messages only.** Images and files cannot be handed to OmO through the
-  pane, so the bridge replies saying so rather than going quiet. Support would
-  mean downloading the media and writing it into the agent's working directory.
+- **Attachments are fetched, not inlined.** Images and files arrive as a
+  `downloadCode`; the bridge redeems it and writes the bytes into the agent's
+  working directory (`.dingtalk-inbox/`), then asks the agent to open that path.
+  Whether the agent can *interpret* the contents depends on its model — a
+  non-multimodal model will say it cannot read an image, which is the agent's
+  answer to give, not the bridge's.
 - **One turn at a time.** A message that arrives mid-turn gets "still working on
   the previous one" instead of queueing.
 - **No allowlist by default**, which on a shared bot is a real exposure. See

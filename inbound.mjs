@@ -1,18 +1,23 @@
 // Decide what to do with an inbound DingTalk message.
 //
 // Pulled out of the bridge's handle() so the rules can be tested without a
-// Stream connection: dingtalk-bridge.mjs connects at module top level, so it
-// cannot be imported by a test.
+// Stream connection: dingtalk-bridge.mjs connects at module level and cannot be
+// imported by a test.
 //
-// The order matters and used to be wrong. The bridge checked for empty text
-// before anything else, so a non-text message (an image, a file) got no tag,
-// no reply and nothing but a log line — indistinguishable from the bot being
-// dead. Unsupported *types* are now answered explicitly.
+// Order matters and used to be wrong. The bridge checked for empty text before
+// anything else, so a non-text message got no tag, no reply and nothing but a
+// log line — indistinguishable from the bot being dead. Now:
+//
+//   REJECT       not allowed to talk to this bot
+//   ATTACHMENT   allowed, and carries a downloadCode we can redeem
+//   UNSUPPORTED  allowed, but there is nothing we can act on
+//   PROCESS      hand the text to the agent
 
 export const ACTIONS = {
-  REJECT: "reject", // not allowed to talk to this bot
-  UNSUPPORTED: "unsupported", // allowed, but this kind of message is not handled
-  PROCESS: "process", // hand it to the agent
+  REJECT: "reject",
+  ATTACHMENT: "attachment",
+  UNSUPPORTED: "unsupported",
+  PROCESS: "process",
 };
 
 /**
@@ -24,14 +29,19 @@ export function classifyInbound(msg, { allow = [] } = {}) {
   const msgtype = msg?.msgtype ?? "text";
   const text = String(msg?.text?.content ?? "").trim();
   const staffId = msg?.senderStaffId;
+  const content = msg?.content ?? {};
+  const downloadCode = String(content.downloadCode ?? content.pictureDownloadCode ?? "").trim();
 
   if (allow.length && !allow.includes(staffId)) {
     return { action: ACTIONS.REJECT, msgtype, text, staffId };
   }
 
-  // `text` messages that are empty (whitespace, or a payload we cannot read)
-  // fall in here too: from the user's point of view it is still not something
-  // we can act on, and silence is the worst answer.
+  // A non-text message with a downloadCode is something we can actually fetch:
+  // images, files, voice notes. Text messages never carry one.
+  if (msgtype !== "text" && downloadCode) {
+    return { action: ACTIONS.ATTACHMENT, msgtype, text, staffId, downloadCode };
+  }
+
   if (msgtype !== "text" || !text) {
     return { action: ACTIONS.UNSUPPORTED, msgtype, text, staffId };
   }

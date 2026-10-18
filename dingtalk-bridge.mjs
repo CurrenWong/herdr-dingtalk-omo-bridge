@@ -20,6 +20,7 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statS
 import { homedir } from "node:os";
 import { join, resolve as resolvePath } from "node:path";
 import { DWClient, TOPIC_ROBOT } from "dingtalk-stream";
+import { saveAttachment } from "./attachments.mjs";
 import { ACTIONS, classifyInbound } from "./inbound.mjs";
 import { DEFAULT_PLUGIN_ID, defaultConfigDir, defaultStateDir } from "./herdr-paths.mjs";
 
@@ -36,6 +37,10 @@ const TARGET = process.env.LAB_TARGET_PANE ?? "";
 const ANSWER_TIMEOUT_MS = Number(process.env.LAB_AGENT_TIMEOUT_MS ?? 300000);
 const READ_LINES = 60;
 const OMO_SESSIONS = join(homedir(), ".omo", "agent", "sessions");
+// Attachments are written into the agent's working directory, not the plugin's
+// state dir: the agent opens them by path, and a relative path in its own
+// workspace is the least surprising thing to hand it.
+const ATTACHMENT_DIR = process.env.LAB_ATTACHMENT_DIR ?? ".dingtalk-inbox";
 
 // Every string the bot says to the user lives here so the plugin is not welded
 // to one language. Set LAB_LANG=en for English; anything else falls back to the
@@ -51,6 +56,9 @@ const TEXT = {
     busy: "上一条还在处理中，稍等。",
     handleFailed: (msg) => `桥接出错：${msg}`,
     unsupported: (type) => `只支持文本消息，收到的是 ${type}。图片和文件没法交给 OmO。`,
+    attachmentPrompt: ({ type, path, size }) =>
+      `用户通过钉钉发来一个 ${type} 附件，已保存到本地：\n${path}\n（${size}）\n\n请查看这个文件并回应。如果无法直接读取其中的内容，请说明原因，不要猜测。`,
+    attachmentFailed: (err) => `附件下载失败：${err}`,
   },
   en: {
     fallbackTitle: "Reply",
@@ -61,6 +69,9 @@ const TEXT = {
     busy: "Still working on the previous message.",
     handleFailed: (msg) => `Bridge error: ${msg}`,
     unsupported: (type) => `Text messages only — this one was "${type}". Images and files cannot be handed to OmO.`,
+    attachmentPrompt: ({ type, path, size }) =>
+      `The user sent a ${type} attachment through DingTalk. It is saved locally at:\n${path}\n(${size})\n\nPlease look at it and respond. If you cannot actually read its contents, say so rather than guessing.`,
+    attachmentFailed: (err) => `Could not download the attachment: ${err}`,
   },
 };
 const t = (key, ...args) => TEXT[LANG][key](...args);
@@ -429,7 +440,35 @@ async function handle(msg) {
   }
   log("-> agent", JSON.stringify({ agent: AGENT, pane: paneId, cwd: info?.cwd, status: info?.agent_status }));
 
-  const answer = await askAgent(paneId, verdict.text, info?.cwd);
+  // Attachments are redeemed into the agent's working directory so the agent
+  // can open them with its normal tools. DingTalk never sends the bytes in the
+  // callback, and the download URL it hands back is short-lived, so this has to
+  // happen now rather than being queued.
+  let promptText = verdict.text;
+  if (verdict.action === ACTIONS.ATTACHMENT) {
+    const dir = join(info?.cwd ?? process.cwd(), ATTACHMENT_DIR);
+    try {
+      const saved = await saveAttachment({
+        msg,
+        robotCode: msg.robotCode ?? msg.chatbotCorpId ?? CLIENT_ID,
+        accessToken,
+        dir,
+      });
+      log("attachment saved", JSON.stringify({ path: saved.path, bytes: saved.bytes, type: saved.contentType }));
+      promptText = t("attachmentPrompt", {
+        type: verdict.msgtype,
+        path: saved.path,
+        size: `${Math.max(1, Math.round(saved.bytes / 1024))} KB`,
+      });
+    } catch (err) {
+      log("!! attachment failed", err.message);
+      await push(msg.sessionWebhook, t("attachmentFailed", err.message));
+      await finish(false);
+      return;
+    }
+  }
+
+  const answer = await askAgent(paneId, promptText, info?.cwd);
   await push(msg.sessionWebhook, answer.text.slice(0, 4000));
   await finish(answer.ok);
 }
