@@ -85,7 +85,12 @@ jobs:
 
       - name: Stage for approval
         if: ${{ !inputs.dry_run }}
+        # Both names are set on purpose. The project .npmrc refers to
+        # ${NPM_TOKEN} and outranks setup-node's user-level config, so an unset
+        # NPM_TOKEN would shadow the working credential with an empty one.
+        # NODE_AUTH_TOKEN is what setup-node's generated .npmrc expects.
         env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           npm stage publish --access public

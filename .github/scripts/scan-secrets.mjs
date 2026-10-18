@@ -13,9 +13,15 @@ const root = process.argv[2] ?? process.cwd();
 
 const SKIP_DIRS = new Set([".git", "node_modules", "state", ".github/workflows"]);
 const TEXT_EXT = new Set([".js", ".mjs", ".cjs", ".json", ".toml", ".md", ".yml", ".yaml", ".txt", ".sh"]);
+// Dotfiles and config files that carry no extension but must always be scanned.
+const ALWAYS_TEXT = new Set([".npmrc", ".env", ".gitignore", ".gitattributes", ".yarnrc"]);
 
 const PATTERNS = [
   ["GitHub token", /\bgh[pousr]_[A-Za-z0-9]{20,}/g],
+  // npm access tokens. The repo ships a .npmrc that authenticates from
+  // ${NPM_TOKEN}; a literal token pasted on that line would get committed.
+  ["npm access token", /\bnpm_[A-Za-z0-9]{30,}/g],
+  ["npmrc literal token", /_authToken\s*=\s*(?!\$\{)[A-Za-z0-9_-]{10,}/g],
   ["AWS access key", /\bAKIA[0-9A-Z]{16}\b/g],
   ["private key block", /-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/g],
   ["assigned secret literal", /\b(?:client_secret|appSecret|api_key|apiKey|password|passwd)\s*[:=]\s*["'][^"'\s]{12,}["']/gi],
@@ -40,9 +46,13 @@ function scanFile(path) {
   for (const re of FORBIDDEN) {
     if (re.test(rel)) findings.push({ rel, rule: "forbidden path", snippet: rel });
   }
-  // Match only the basename's extension; allow dotfiles like .gitignore.
-  const ext = /\.[^./]+$/.exec(rel)?.[0] ?? "";
-  if (!TEXT_EXT.has(ext)) return;
+  // Decide by basename, not just extension. `.npmrc` has no extension at all
+  // and is exactly where an npm token would be pasted, so an extension-only
+  // allowlist silently skips the file most likely to leak.
+  const base = rel.split("/").pop();
+  const ext = /\.[^./]+$/.exec(base)?.[0] ?? "";
+  const isText = TEXT_EXT.has(ext) || ALWAYS_TEXT.has(base) || (ext === "" && text.length < 1024 * 1024);
+  if (!isText) return;
 
   for (const [name, re] of PATTERNS) {
     re.lastIndex = 0;
