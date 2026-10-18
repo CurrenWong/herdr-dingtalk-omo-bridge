@@ -28,6 +28,7 @@
     "probe.mjs",
     "probe-emotion.mjs",
     "session-log.mjs",
+    "slash.mjs",
     "startup.mjs",
     "supervise.mjs",
     "npm-shrinkwrap.json",

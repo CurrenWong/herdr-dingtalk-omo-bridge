@@ -370,6 +370,25 @@ open the file with its usual tools. Names are sanitised but keep their script:
 
 Files over 20 MB are refused rather than pulled into the workspace.
 
+### Slash commands
+
+OmO's slash commands are handled by the TUI, not the model, so **nothing is
+written to the session log** — the bridge would otherwise wait out its full
+timeout for an answer that cannot arrive. They are decided before anything is
+typed:
+
+| | Commands | What the bridge does |
+|---|---|---|
+| Runs and reports | `/session` `/help` `/hotkeys` `/changelog` `/reload` `/compact` `/new` `/rename`, and `/model <id>` `/thinking <level>` `/reasoning on\|off` `/efforts <level>` `/fast on\|off` | Sends it, then reads the new lines off the screen and replies with them |
+| Needs a keyboard | `/sessions` `/resume` `/settings` `/tree` `/fork` `/clone` `/scoped-models` `/keybindings` `/llama`, and any of the above without its argument | Refused with the reason. A picker left open would swallow every following message into its filter |
+| Refused | `/quit` `/exit` `/login` `/logout` `/import` `/trust` | Refused. These close the agent the bridge talks to, or touch credentials and files |
+| Passed through | `/skill:name`, prompt templates, extension commands | Sent as an ordinary prompt — those *do* reach the model |
+
+Reading the screen back needs care, because a TUI repaints rather than appends
+and the same command run twice produces identical output. The bridge reads the
+scrollback buffer (`--source recent`) rather than the viewport, so the old screen
+stays a genuine prefix of the new one and the split is exact.
+
 ### The message tags
 
 These are plain REST calls against the DingTalk emotion API, which needs an app
@@ -560,6 +579,20 @@ If you get it running elsewhere, widening the manifest to
 
 **标签是独立的 REST 调用**，需要 app accessToken（Stream 长连接本身拿不到），
 所以任何失败都只记日志、绝不吞掉正文回复。`LAB_EMOTIONS=0` 可整体关闭。
+
+**魔法命令（斜杠命令）需要单独处理。** OmO 的 `/session`、`/model` 这类命令由界面自己
+处理，**不写会话日志**；桥如果按普通消息发过去，会白等满整个超时。所以发送前先分类：
+
+| | 命令 | 桥的做法 |
+|---|---|---|
+| 能跑 | `/session` `/help` `/hotkeys` `/changelog` `/reload` `/compact` `/new` `/rename`，以及带参数的 `/model <id>` `/thinking <level>` `/reasoning on\|off` `/efforts <level>` `/fast on\|off` | 发过去，然后把屏幕上新增的内容读回来发给你 |
+| 要键盘 | `/sessions` `/resume` `/settings` `/tree` `/fork` `/clone` `/scoped-models` `/keybindings` `/llama`，以及上面那些不带参数的 | 拒绝并说明。留着选择器比拒绝更糟——之后每条消息都会被输入进它的搜索框 |
+| 拒绝 | `/quit` `/exit` `/login` `/logout` `/import` `/trust` | 拒绝。会关掉桥正在对话的 agent，或动到凭据和文件 |
+| 放行 | `/skill:name`、prompt 模板、扩展注册的命令 | 当普通提示词发过去——这些**确实**会到模型 |
+
+读屏有个坑：TUI 是重绘而不是追加，同一条命令跑两次输出一模一样，按文本比对分不出
+新旧。所以桥读的是回滚缓冲（`--source recent`）而不是视口，旧屏才是新屏的真前缀，
+切分点唯一。
 
 **图片和文件会被取回来。** 图片消息本身不含图片，只有一个 `downloadCode`；桥拿它
 去换临时下载地址、把字节存进 OmO 自己的工作目录，然后把**绝对路径**告诉 OmO（字节

@@ -24,6 +24,7 @@ import { saveAttachment } from "./attachments.mjs";
 import { ACTIONS, classifyInbound } from "./inbound.mjs";
 import { assistantMessagesSince, lastAssistantText } from "./session-log.mjs";
 import { CHOICE_TTL_MS, agentChoices, parseChoice, selectAgent } from "./agent-target.mjs";
+import { SLASH, classifySlash, pickNewLines } from "./slash.mjs";
 import { DEFAULT_PLUGIN_ID, defaultConfigDir, defaultStateDir } from "./herdr-paths.mjs";
 
 const HERDR = process.env.HERDR_BIN_PATH ?? "herdr";
@@ -70,6 +71,14 @@ const TEXT = {
     choiceExpired: "选择已过期，请重发刚才的消息。",
     renameOk: ({ pane, label, name }) => `✅ 已把 ${pane}${label ? `（${label}）` : ""} 改名为 ${name}。请重发刚才的消息。`,
     renameFailed: (err) => `❌ 改名失败：${err}`,
+    slashNeedsArg: (cmd, example) =>
+      `/${cmd} 不带参数会弹出选择器，钉钉这边没有方向键，用不了。带参数就行，例如 ${example}。`,
+    slashInteractive: (cmd) =>
+      `/${cmd} 会打开全屏选择界面，需要键盘操作，钉钉这边用不了。请在 Herdr 里直接操。`,
+    slashDangerous: (cmd) =>
+      `/${cmd} 不在远程允许的范围内（会关掉 agent，或动到凭据和文件）。请在 Herdr 里执行。`,
+    slashNoOutput: (cmd) => `/${cmd} 执行了，但屏幕上没有出现新内容。`,
+    slashOutput: (cmd, out) => `/${cmd} 的输出：\n\n${out}`,
     busy: "上一条还在处理中，稍等。",
     handleFailed: (msg) => `桥接出错：${msg}`,
     unsupported: (type) => `只支持文本消息，收到的是 ${type}。图片和文件没法交给 OmO。`,
@@ -94,6 +103,14 @@ const TEXT = {
     choiceExpired: "That choice expired — please resend your message.",
     renameOk: ({ pane, label, name }) => `✅ Renamed ${pane}${label ? ` (${label})` : ""} to ${name}. Resend your message.`,
     renameFailed: (err) => `❌ Rename failed: ${err}`,
+    slashNeedsArg: (cmd, example) =>
+      `/${cmd} opens a picker without an argument, and DingTalk has no arrow keys. Pass an argument instead, e.g. ${example}.`,
+    slashInteractive: (cmd) =>
+      `/${cmd} opens a full-screen picker that needs a keyboard, which DingTalk cannot drive. Run it in Herdr.`,
+    slashDangerous: (cmd) =>
+      `/${cmd} is not allowed remotely — it would close the agent or touch credentials and files. Run it in Herdr.`,
+    slashNoOutput: (cmd) => `/${cmd} ran, but nothing new appeared on screen.`,
+    slashOutput: (cmd, out) => `/${cmd} output:\n\n${out}`,
     busy: "Still working on the previous message.",
     handleFailed: (msg) => `Bridge error: ${msg}`,
     unsupported: (type) => `Text messages only — this one was "${type}". Images and files cannot be handed to OmO.`,
@@ -299,7 +316,6 @@ function newOutputSince(before, after) {
 }
 
 // --- DingTalk push ----------------------------------------------------------
-
 const pendingPath = join(STATE_DIR, "pending-push.json");
 
 function savePending(webhook, text) {
@@ -421,6 +437,50 @@ async function tag(msgId, convId, emoji, { recall = false } = {}) {
 }
 
 // --- Turn handling ----------------------------------------------------------
+
+// Worked examples for the picker commands, so "pass an argument" comes with the
+// actual shape rather than leaving the user to guess it.
+const SLASH_EXAMPLES = {
+  model: "/model deepseek-flash",
+  thinking: "/thinking high",
+  reasoning: "/reasoning off",
+  efforts: "/efforts high",
+  fast: "/fast on",
+};
+
+/**
+ * Run a TUI command and return what it drew.
+ *
+ * These never reach the model, so nothing lands in the session log and the
+ * normal reader would sit out its whole timeout waiting for an answer that
+ * cannot arrive. The screen is the only channel there is.
+ */
+async function runPaneCommand(paneId, command) {
+  // Read the scrollback buffer, not the viewport. The viewport is a fixed 60
+  // lines, so a command that prints more than the screen holds pushes old lines
+  // off the top and the before/after alignment becomes ambiguous — twice in a
+  // row with identical output and there is no way to tell which copy is new.
+  // `recent` returns the whole buffer (150+ lines here), so the old screen stays
+  // a genuine prefix and the split is exact.
+  const readBuffer = () => stripAnsi(herdr(["pane", "read", paneId, "--source", "recent", "--lines", "400"]));
+  const before = readBuffer();
+  const payload = command.replace(/\r?\n/g, " ");
+
+  herdr(["pane", "send-text", paneId, payload]);
+  await sleep(300);
+  herdr(["pane", "send-keys", paneId, "enter"]);
+
+  // Some of these paint on the next frame; /compact or /reload may take a
+  // moment. Poll instead of picking one delay that is wrong for both.
+  let out = "";
+  for (let i = 0; i < 8; i += 1) {
+    await sleep(500);
+    out = pickNewLines(before, readBuffer());
+    if (out) break;
+  }
+  log("pane command output", JSON.stringify({ command: payload, chars: out.length, head: out.slice(0, 200) }));
+  return out;
+}
 
 let busy = false;
 const state = { started_at: new Date().toISOString(), seen: 0, last_push: null };
@@ -583,6 +643,35 @@ async function handle(msg) {
   if (!paneId) {
     const asked = await explainNoAgent(msg, lastMiss);
     await finish(asked);
+    return;
+  }
+
+  // Slash commands are handled by the TUI, not the model: they write nothing to
+  // the session log, and some of them leave a picker open that would swallow
+  // every following message. Decide here, before anything is typed.
+  const slash = classifySlash(verdict.text);
+  if (slash.kind !== SLASH.NONE) {
+    log("slash command", JSON.stringify({ command: slash.command, kind: slash.kind, arg: slash.arg }));
+
+    if (slash.kind === SLASH.DANGEROUS) {
+      await push(msg.sessionWebhook, t("slashDangerous", slash.command));
+      await finish(false);
+      return;
+    }
+
+    if (slash.kind === SLASH.INTERACTIVE || slash.kind === SLASH.NEEDS_ARG) {
+      const example = SLASH_EXAMPLES[slash.command] ?? "";
+      await push(
+        msg.sessionWebhook,
+        slash.kind === SLASH.NEEDS_ARG ? t("slashNeedsArg", slash.command, example) : t("slashInteractive", slash.command),
+      );
+      await finish(false);
+      return;
+    }
+
+    const out = await runPaneCommand(paneId, verdict.text);
+    await push(msg.sessionWebhook, out ? t("slashOutput", slash.command, out) : t("slashNoOutput", slash.command));
+    await finish(true);
     return;
   }
   log("-> agent", JSON.stringify({ agent: AGENT, pane: paneId, cwd: info?.cwd, status: info?.agent_status }));
