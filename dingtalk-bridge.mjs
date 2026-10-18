@@ -1031,7 +1031,10 @@ async function askAgent(paneId, text, cwd, onProgress) {
     }
     if (abortEpoch !== myAbortEpoch) {
       log("turn interrupted by /abort");
-      return { text: "", ok: false };
+      // `aborted` is not `ok: false`. Nothing failed — the user asked for this —
+      // but the message still has no answer, so it cannot be reported as a
+      // success either. The caller decides what to tag; Error would be a lie.
+      return { text: "", ok: false, aborted: true };
     }
   }
   log("!! timeout after", ANSWER_TIMEOUT_MS, "ms (sawWorking=" + sawWorking + ")");
@@ -1284,7 +1287,10 @@ async function handle(msg) {
       : answer.text;
     await push(msg.sessionWebhook, body);
   }
-  await finish(answer.ok);
+  // An interrupted turn is tagged Done: the user stopped it on purpose and the
+  // bridge did what it was told, so Error would send someone looking for a
+  // failure that does not exist.
+  await finish(answer.aborted ? true : answer.ok);
 }
 
 // --- Stream client ----------------------------------------------------------
