@@ -381,8 +381,8 @@ what the docs claim:
 | | Commands | What the bridge does |
 |---|---|---|
 | Verified inline | `/session` `/hotkeys` `/changelog` `/reload` | Runs it, reads the new lines off the screen, replies with them |
-| Driven picker | `/model`, `/model <term>` | See below |
-| Refused — overlay | `/help` (measured: full-screen help), plus `/sessions` `/resume` `/settings` `/tree` `/fork` `/clone` `/scoped-models` `/keybindings` `/llama` `/copy` `/export` | Refused. A picker left open swallows every following message into its filter |
+| Driven picker | `/model`, `/model <term>`, `/sessions`, `/sessions <term>` | See below |
+| Refused — overlay | `/help` (measured: full-screen help), plus `/settings` `/tree` `/fork` `/clone` `/scoped-models` `/keybindings` `/llama` `/copy` `/export` | Refused. A picker left open swallows every following message into its filter |
 | Refused — untested | `/thinking` `/reasoning` `/efforts` `/fast` `/compact` `/new` `/rename` | Refused until someone watches what they actually do |
 | Refused — destructive | `/quit` `/exit` `/login` `/logout` `/import` `/trust` | Refused. These close the agent or touch credentials and files |
 | Passed through | `/skill:name`, prompt templates, extension commands | Sent as an ordinary prompt — those *do* reach the model |
@@ -406,6 +406,14 @@ Reading the screen back needs care, because a TUI repaints rather than appends
 and the same command run twice produces identical output. The bridge reads the
 scrollback buffer (`--source recent`) rather than the viewport, so the old screen
 stays a genuine prefix of the new one and the split is exact.
+
+**`/sessions`** opens the `/resume` picker. Bare, it lists what is on screen with
+numbers; with a term it filters and presses Enter only when one session is left.
+It is deliberately confined to the picker's default **Current Folder** scope: a
+session from another directory starts its own session file, and the bridge reads
+answers from the file belonging to the agent's working directory, so resuming a
+foreign session would leave every later reply unreadable. Pressing Tab there
+switches the picker to All — left to a human in Herdr.
 
 ### The message tags
 
@@ -605,8 +613,8 @@ If you get it running elsewhere, widening the manifest to
 | | 命令 | 桥的做法 |
 |---|---|---|
 | 实测可跑 | `/session` `/hotkeys` `/changelog` `/reload` | 发过去，把屏幕新增内容读回来 |
-| 驱动选择器 | `/model`、`/model <关键词>` | 见下 |
-| 拒绝·会弹框 | `/help`（实测是全屏帮助），以及 `/sessions` `/resume` `/settings` `/tree` `/fork` `/clone` `/scoped-models` `/keybindings` `/llama` `/copy` `/export` | 拒绝。留着选择器，之后每条消息都会被输入进它的搜索框 |
+| 驱动选择器 | `/model`、`/model <关键词>`、`/sessions`、`/sessions <关键词>` | 见下 |
+| 拒绝·会弹框 | `/help`（实测是全屏帮助），以及 `/settings` `/tree` `/fork` `/clone` `/scoped-models` `/keybindings` `/llama` `/copy` `/export` | 拒绝。留着选择器，之后每条消息都会被输入进它的搜索框 |
 | 拒绝·未验证 | `/thinking` `/reasoning` `/efforts` `/fast` `/compact` `/new` `/rename` | 在有人看过它真实行为之前一律拒绝 |
 | 拒绝·危险 | `/quit` `/exit` `/login` `/logout` `/import` `/trust` | 拒绝。会关掉 agent，或动到凭据和文件 |
 | 放行 | `/skill:name`、prompt 模板、扩展注册的命令 | 当普通提示词发过去——这些**确实**会到模型 |
@@ -624,6 +632,11 @@ If you get it running elsewhere, widening the manifest to
 
 读屏还有个坑：TUI 是重绘而不是追加，同一条命令跑两次输出一模一样，按文本比对分不出
 新旧。所以桥读的是回滚缓冲（`--source recent`）而不是视口，旧屏才是新屏的真前缀。
+
+**`/sessions`** 打开的是 `/resume` 选择器。不带参数时把屏幕上的会话列出来并编号；带关键词
+时过滤，**只剩一条才回车**。它刻意只用选择器默认的 **当前目录** 范围：别的目录的会话会
+开自己的会话文件，而桥是从「agent 工作目录对应的那个文件」读回答的，恢复外来会话会让之后
+每条回复都读不到。要跨目录，在 Herdr 里按 Tab 切到 All——这一步留给人。
 
 
 **图片和文件会被取回来。** 图片消息本身不含图片，只有一个 `downloadCode`；桥拿它

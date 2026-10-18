@@ -24,7 +24,14 @@ import { saveAttachment } from "./attachments.mjs";
 import { ACTIONS, classifyInbound } from "./inbound.mjs";
 import { assistantMessagesSince, lastAssistantText } from "./session-log.mjs";
 import { CHOICE_TTL_MS, agentChoices, parseChoice, selectAgent } from "./agent-target.mjs";
-import { SLASH, classifySlash, parsePickerRows, parseSessionReport, pickNewLines } from "./slash.mjs";
+import {
+  SLASH,
+  classifySlash,
+  parsePickerRows,
+  parseSessionReport,
+  parseSessionRows,
+  pickNewLines,
+} from "./slash.mjs";
 import { DEFAULT_PLUGIN_ID, defaultConfigDir, defaultStateDir } from "./herdr-paths.mjs";
 
 const HERDR = process.env.HERDR_BIN_PATH ?? "herdr";
@@ -117,6 +124,12 @@ const TEXT = {
     modelAmbiguous: (term, list) => `「${term}」匹配到多个模型，没有替你选：\n\n${list}\n\n换个更具体的关键词再试。`,
     modelSwitched: (id, provider) => `✅ 已切换到 ${id}（${provider}）。`,
     modelStuck: "选择器没有关掉，已按 Escape 退出，请确认当前模型。",
+    sessionList: (list, n) => `最近的会话（本目录可见 ${n} 个）：\n\n${list}\n\n用 /sessions <名称关键词> 恢复其中一个。`,
+    sessionPickerFailed: "没能打开会话选择器。",
+    sessionNoMatch: (term) => `当前目录下没有匹配「${term}」的会话。跨目录的会话到 Herdr 里按 Tab 切到 All。`,
+    sessionAmbiguous: (term, list) => `「${term}」匹配到多个会话，没有替你选：\n\n${list}\n\n换个更具体的关键词。`,
+    sessionResumed: (name, path) => `✅ 已恢复会话：${name}\n   ${path}`,
+    sessionStuck: "选择器没有关掉，已按 Escape 退出。",
     busy: "上一条还在处理中，稍等。",
     handleFailed: (msg) => `桥接出错：${msg}`,
     unsupported: (type) => `只支持文本消息，收到的是 ${type}。图片和文件没法交给 OmO。`,
@@ -184,6 +197,12 @@ const TEXT = {
     modelAmbiguous: (term, list) => `"${term}" matches several models, so nothing was chosen:\n\n${list}\n\nUse a more specific term.`,
     modelSwitched: (id, provider) => `✅ Switched to ${id} (${provider}).`,
     modelStuck: "The picker did not close; escaped out. Check which model is active.",
+    sessionList: (list, n) => `Recent sessions in this folder (${n} visible):\n\n${list}\n\nResume one with /sessions <part of its name>.`,
+    sessionPickerFailed: "Could not open the session picker.",
+    sessionNoMatch: (term) => `No session in this folder matches "${term}". For sessions from another folder, press Tab in Herdr to switch the picker to All.`,
+    sessionAmbiguous: (term, list) => `"${term}" matches several sessions, so nothing was chosen:\n\n${list}\n\nUse a more specific term.`,
+    sessionResumed: (name, path) => `✅ Resumed: ${name}\n   ${path}`,
+    sessionStuck: "The picker did not close; escaped out.",
     busy: "Still working on the previous message.",
     handleFailed: (msg) => `Bridge error: ${msg}`,
     unsupported: (type) => `Text messages only — this one was "${type}". Images and files cannot be handed to OmO.`,
@@ -569,6 +588,76 @@ async function openModelPicker(paneId) {
   return null;
 }
 
+const formatSessionRows = (rows) =>
+  rows
+    .map((r, i) => `${i + 1}. ${r.name}  [${r.count} 条 · ${r.age}]\n   ${r.path}`)
+    .join("\n");
+
+async function openSessionPicker(paneId) {
+  // A saved session has to be loaded, so this is slower than the model picker.
+  herdr(["pane", "send-text", paneId, "/resume"]);
+  await sleep(300);
+  herdr(["pane", "send-keys", paneId, "enter"]);
+
+  for (let i = 0; i < 14; i += 1) {
+    await sleep(400);
+    const screen = readScreen(paneId);
+    if (!atEditor(screen)) return screen;
+  }
+  return null;
+}
+
+/**
+ * Drive the `/resume` picker: Type to filter, Enter only when one row is left.
+ *
+ * Deliberately confined to the picker's default `Current Folder` scope. A
+ * session from another directory starts its own session file, and the bridge
+ * reads answers from the file belonging to the agent's working directory — so
+ * resuming one from elsewhere would leave every later reply unreadable. Pressing
+ * Tab switches to `All` and is left to a human in Herdr.
+ */
+async function driveSessionPicker(paneId, term) {
+  const screen = await openSessionPicker(paneId);
+  if (!screen) {
+    log("!! session picker did not open");
+    return { ok: false, text: t("sessionPickerFailed") };
+  }
+
+  const close = () => herdr(["pane", "send-keys", paneId, "escape"]);
+
+  if (!term) {
+    const rows = parseSessionRows(screen);
+    log("session list", JSON.stringify({ rows: rows.length }));
+    close();
+    if (!rows.length) return { ok: false, text: t("sessionPickerFailed") };
+    return { ok: true, text: t("sessionList", formatSessionRows(rows), rows.length) };
+  }
+
+  herdr(["pane", "send-text", paneId, term]);
+  await sleep(900);
+  const rows = parseSessionRows(readScreen(paneId));
+
+  if (rows.length !== 1) {
+    close();
+    log("session filter", JSON.stringify({ term, matches: rows.length }));
+    if (!rows.length) return { ok: false, text: t("sessionNoMatch", term) };
+    return { ok: true, text: t("sessionAmbiguous", term, formatSessionRows(rows)) };
+  }
+
+  const chosen = rows[0];
+  herdr(["pane", "send-keys", paneId, "enter"]);
+  await sleep(2500);
+
+  if (!atEditor(readScreen(paneId))) {
+    close();
+    log("!! session picker did not close after enter");
+    return { ok: false, text: t("sessionStuck") };
+  }
+
+  log("session resumed", JSON.stringify(chosen));
+  return { ok: true, text: t("sessionResumed", chosen.name, chosen.path) };
+}
+
 const formatPickerRows = (rows) =>
   rows
     .map((r) => `${r.highlighted ? "→" : " "} ${r.id} [${r.provider}]${r.active ? " ✓" : ""}`)
@@ -811,6 +900,13 @@ async function handle(msg) {
 
     if (slash.kind === SLASH.MODEL) {
       const result = await driveModelPicker(paneId, slash.arg);
+      await push(msg.sessionWebhook, result.text);
+      await finish(result.ok);
+      return;
+    }
+
+    if (slash.kind === SLASH.SESSIONS) {
+      const result = await driveSessionPicker(paneId, slash.arg);
       await push(msg.sessionWebhook, result.text);
       await finish(result.ok);
       return;

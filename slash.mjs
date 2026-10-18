@@ -26,6 +26,7 @@ export const SLASH = {
   NONE: "none",
   SUPPORTED: "supported",
   MODEL: "model",
+  SESSIONS: "sessions",
   INTERACTIVE: "interactive",
   DANGEROUS: "dangerous",
 };
@@ -36,13 +37,14 @@ const SUPPORTED = new Set(["session", "hotkeys", "changelog", "reload"]);
 // Needs its picker driven rather than typed at; see parsePickerRows.
 const MODEL = new Set(["model"]);
 
+// `/sessions` is an alias of `/resume`; both open the same picker.
+const SESSIONS = new Set(["sessions", "resume"]);
+
 // Either verified as a modal, or never tested. Both are refused: an overlay left
 // open swallows every following message into its filter, and the bot looks like
 // it is working while receiving nothing.
 const INTERACTIVE = new Set([
   "help", // measured: full-screen help overlay
-  "sessions",
-  "resume",
   "settings",
   "tree",
   "fork",
@@ -85,6 +87,7 @@ export function classifySlash(text) {
 
   if (DANGEROUS.has(command)) return { kind: SLASH.DANGEROUS, command, arg };
   if (MODEL.has(command)) return { kind: SLASH.MODEL, command, arg };
+  if (SESSIONS.has(command)) return { kind: SLASH.SESSIONS, command, arg };
   if (SUPPORTED.has(command)) return { kind: SLASH.SUPPORTED, command, arg };
   if (INTERACTIVE.has(command)) return { kind: SLASH.INTERACTIVE, command, arg };
 
@@ -253,6 +256,57 @@ export function parseSessionReport(text) {
   return report;
 }
 
+
+/**
+ * Rows of the `/resume` picker, as drawn:
+ *
+ *     › 模型列表交互功能咨询      12  20m
+ *       models                    61   1h
+ *
+ * and, when the path column is on (Ctrl+P, or the All scope),
+ *
+ *     › 模型列表交互功能咨询   ~\...\herdr-bridge-lab   12  18m
+ *
+ * So the count and age are read from the right and a path column is optional.
+ * Rows are validated by shape — numeric count, an age like `18m` — which is what
+ * keeps header lines and the page indicator out.
+ */
+export function parseSessionRows(screen) {
+  const rows = [];
+
+  for (const raw of String(screen ?? "").replace(/\r/g, "").split("\n")) {
+    const line = raw.trim();
+    if (!line) continue;
+    if (/^\(\d+\/\d+\)$/.test(line)) continue; // page indicator
+    if (!/^[›>]?\s*\S/.test(line)) continue;
+
+    const highlighted = /^[›>]\s*/.test(line);
+    const body = line.replace(/^[›>]\s*/, "");
+
+    // Count and age sit at the right, separated from each other by a single
+    // space and from the name by a run of spaces — so anchor on the end rather
+    // than splitting, which would merge "12 21m" into one column.
+    const tail = body.match(/^(.*?)\s{2,}(\d+)\s+(\d+\s*[a-z]+)$/i);
+    if (!tail) continue;
+
+    const count = tail[2];
+    const age = tail[3];
+    let left = tail[1].trim();
+    let path = "";
+
+    // The path column only appears with Ctrl+P (or in the All scope).
+    const withPath = left.match(/^(.*?)\s{2,}(\S*[\\/~]\S*)$/);
+    if (withPath) {
+      left = withPath[1].trim();
+      path = withPath[2].trim();
+    }
+
+    if (!left) continue;
+    rows.push({ name: left, path, count, age, highlighted });
+  }
+
+  return rows;
+}
 
 const isRule = (line) => /^[─═━╌┄┈]{3,}$/.test(line);
 
