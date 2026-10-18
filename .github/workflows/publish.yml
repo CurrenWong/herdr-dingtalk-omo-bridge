@@ -1,22 +1,32 @@
 name: Publish to npm
 
 # Manual only. Publishing is a deliberate act, so this never fires on push.
-# Requires a trusted publisher configured on npmjs.com for this repository
-# (Settings → Trusted Publishing), which avoids storing an npm token at all.
+#
+# Auth: NPM_TOKEN (a granular access token with "read and write" for this
+# package, stored as a repository secret).
+#
+# Why not OIDC trusted publishing? npm only lets you configure a trusted
+# publisher on a package that already exists — and for a package that has never
+# been published there is no settings page to configure. So the *first* release
+# has to go out with a token. Once the package exists:
+#   npmjs.com → the package → Settings → Trusted Publishing → add this repo and
+#   this workflow file. After that the token is optional; v2 can switch to OIDC
+#   (permissions: id-token: write; npm publish --provenance) and the secret can
+#   be deleted.
 on:
   workflow_dispatch:
     inputs:
       dry_run:
-        description: "Pack and verify without publishing"
+        description: "Pack and verify only, do not publish"
         type: boolean
-        default: true
+        default: false
 
 permissions:
   contents: read
-  id-token: write # provenance
 
 jobs:
   publish:
+    name: ${{ inputs.dry_run && 'dry run' || 'publish' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -56,6 +66,20 @@ jobs:
             exit 1
           fi
 
+      - name: Check the token secret exists
+        # Fail with the actual reason instead of npm's E401 one step later.
+        if: ${{ !inputs.dry_run }}
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [ -z "$NPM_TOKEN" ]; then
+            echo "::error::repository secret NPM_TOKEN is not set (Settings → Secrets and variables → Actions)"
+            exit 1
+          fi
+          echo "NPM_TOKEN is present (${#NPM_TOKEN} chars)"
+
       - name: Publish
         if: ${{ !inputs.dry_run }}
-        run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --access public
