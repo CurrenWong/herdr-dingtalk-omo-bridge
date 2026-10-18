@@ -186,13 +186,12 @@ const TEXT = {
     notAborting: "🛑 现在没有在跑的任务。",
     status: (s) =>
       [
-        `🟢 桥已连上，运行 ${formatUptime(s.uptime)}`,
-        `OmO：${s.agent}${s.pane ? ` @ ${s.pane}` : ""} — ${s.status}`,
-        `目录：${codeSpan(s.cwd)}`,
-        `会话文件：${codeSpan(s.session)}`,
-        s.queue ? `队列：${s.queue} 条` : "队列：空",
-        `上一条消息：${localStamp(s.last)}`,
-      ].join("\n"),
+        `🟢 **桥已连上**，运行 ${formatUptime(s.uptime)}`,
+        `**OmO** ${s.agent}${s.pane ? ` @ ${s.pane}` : ""} — ${s.status}`,
+        `**队列** ${s.queue ? `${s.queue} 条` : "空"} · **上一条** ${localStamp(s.last)}`,
+        `**目录** ${codeSpan(s.cwd)}`,
+        `**会话文件** ${codeSpan(s.session)}`,
+      ].join("\n\n"),
     handleFailed: (msg) => `桥接出错：${msg}`,
     unsupported: (type) => `只支持文本消息，收到的是 ${type}。图片和文件没法交给 OmO。`,
     attachmentPrompt: ({ type, path, size }) =>
@@ -275,13 +274,12 @@ const TEXT = {
     notAborting: "🛑 Nothing is running.",
     status: (s) =>
       [
-        `🟢 Bridge connected, up ${formatUptime(s.uptime)}`,
-        `OmO: ${s.agent}${s.pane ? ` @ ${s.pane}` : ""} — ${s.status}`,
-        `Directory: ${codeSpan(s.cwd)}`,
-        `Session file: ${codeSpan(s.session)}`,
-        s.queue ? `Queue: ${s.queue} message(s)` : "Queue: empty",
-        `Last message: ${localStamp(s.last)}`,
-      ].join("\n"),
+        `🟢 **Bridge connected**, up ${formatUptime(s.uptime)}`,
+        `**OmO** ${s.agent}${s.pane ? ` @ ${s.pane}` : ""} — ${s.status}`,
+        `**Queue** ${s.queue ? `${s.queue} message(s)` : "empty"} · **Last** ${localStamp(s.last)}`,
+        `**Directory** ${codeSpan(s.cwd)}`,
+        `**Session file** ${codeSpan(s.session)}`,
+      ].join("\n\n"),
     handleFailed: (msg) => `Bridge error: ${msg}`,
     unsupported: (type) => `Text messages only — this one was "${type}". Images and files cannot be handed to OmO.`,
     attachmentPrompt: ({ type, path, size }) =>
@@ -503,7 +501,13 @@ function savePending(webhook, text) {
 async function push(webhook, text) {
   if (!webhook) return;
   state.last_push = { at: new Date().toISOString(), text: text.slice(0, 200) };
-  const title = text.split("\n").map((l) => l.trim()).find(Boolean)?.slice(0, 40) ?? t("fallbackTitle");
+  // The title is plain text in the notification shade, so markdown syntax would
+  // arrive as literal asterisks. The first non-empty line is the heading, which
+  // is what a person would have picked anyway.
+  const title =
+    (text.split("\n").map((l) => l.trim()).find(Boolean) ?? t("fallbackTitle"))
+      .replace(/[*`#]/g, "")
+      .slice(0, 40) || t("fallbackTitle");
   try {
     const res = await fetch(webhook, {
       method: "POST",

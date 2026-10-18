@@ -400,6 +400,31 @@ function scrollback(lines) {
 }
 
 /**
+ * Lines the TUI repaints on its own clock: throughput, cache and elapsed
+ * counters, and the spinner.
+ *
+ * Two reads taken a second apart differ in these while nothing the user asked
+ * for has happened, and that is enough to break whole-screen alignment. Measured
+ * on `/new`: the only line it printed was `✓ New session started`, the counters
+ * had moved by a second, the overlap collapsed to zero lines, and the phone
+ * received thirty lines of the previous conversation instead.
+ *
+ * Only shapes actually seen in this pane are listed. A pattern loose enough to
+ * match anything would make the overlap — the thing that decides what is new —
+ * meaningless.
+ */
+const VOLATILE = [
+  /\bCache hit\s+[\d.]+\s*%/i,
+  /\bTPS\s+[\d.]+\s+tok\/s/i,
+  /\bcalls\/s\b/i,
+  /\(esc to interrupt\b/i,
+  /^[·•]?\s*(?:✓\s*)?<?\d+(?:\.\d+)?\s*(?:ms|s)\b\s*$/i,
+  /^[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏✻✳✶✢✽]\s*\S*$/,
+];
+
+const isVolatile = (line) => VOLATILE.some((re) => re.test(line));
+
+/**
  * The lines a command actually drew, given the screen before and after.
  *
  * Content-based diffing does not work here, and the way it fails is instructive:
@@ -409,17 +434,21 @@ function scrollback(lines) {
  *
  * Position is the reliable signal: output is appended to a scrollback whose tail
  * the viewport shows, so the old screen is not a prefix of the new one — it is
- * shifted left as lines are pushed off the top. `after` begins at `before[d:]`,
- * and everything after the overlap is new.
+ * shifted up as lines are pushed off the top. `after` begins at `before[d:]`, and
+ * everything after the overlap is new.
+ *
+ * The overlap is measured on the lines that do not repaint. One changed counter
+ * used to collapse the overlap to zero — and zero overlap meant "all of it is
+ * new", so a single ticking number could turn a one-line answer into a screenful
+ * of old conversation.
  */
 export function pickNewLines(beforeText, afterText, { keep = 30 } = {}) {
   const before = scrollback(splitLines(beforeText));
   const after = scrollback(splitLines(afterText));
   if (!after.length) return "";
 
-  const dropped = scrollOffset(before, after);
-  const fresh = dropped === -1 ? after : after.slice(Math.max(0, before.length - dropped));
-  const chosen = fresh.length ? fresh : after.slice(-keep);
+  const fresh = freshLines(before, after);
+  const chosen = trimVolatile(fresh.length ? fresh : after.slice(-keep));
   return chosen.slice(-keep).join("\n").trim();
 }
 
@@ -431,22 +460,61 @@ function splitLines(text) {
     .filter(Boolean);
 }
 
-// Where the new screen picks up the old one. Returns -1 when the screens do not
-// align at all (a modal replaced the view).
-function scrollOffset(before, after) {
-  for (let d = 0; d <= before.length; d += 1) {
-    const rest = before.slice(d);
-    if (rest.length === 0) return d;
-    if (rest.length > after.length) continue;
+// Each line, with the position it occupies on screen. Alignment has to reason
+// about stable lines but slice the real screen, so the index travels with it.
+function stableLines(lines) {
+  const out = [];
+  for (let i = 0; i < lines.length; i += 1) {
+    if (!isVolatile(lines[i])) out.push({ line: lines[i], at: i });
+  }
+  return out;
+}
+
+function freshLines(before, after) {
+  const b = stableLines(before);
+  const a = stableLines(after);
+
+  // The longest suffix of `before` that prefixes `after`. Longest first, because
+  // a shorter overlap would claim scrolled-off lines are new.
+  let overlap = -1;
+  for (let d = 0; d <= b.length; d += 1) {
+    const rest = b.slice(d);
+    if (rest.length > a.length) continue;
 
     let same = true;
     for (let i = 0; i < rest.length; i += 1) {
-      if (rest[i] !== after[i]) {
+      if (rest[i].line !== a[i].line) {
         same = false;
         break;
       }
     }
-    if (same) return d;
+    if (!same) continue;
+    overlap = rest.length;
+    break;
   }
-  return -1;
+
+  if (overlap === -1) return [];
+  if (overlap === a.length) return []; // everything on screen was already there
+
+  if (overlap === 0) {
+    // Nothing lines up: a modal replaced the view, or the pane scrolled past
+    // what the buffer still holds. "All of it is new" is the trap that made
+    // /new replay the previous conversation, so narrow it to the lines that
+    // were not on screen before.
+    const seen = new Set(before);
+    const unseen = after.filter((l) => !seen.has(l));
+    return unseen.length ? unseen : [];
+  }
+
+  return after.slice(a[overlap].at);
+}
+
+// A repainted counter is never the answer. Dropped where it touches an edge;
+// kept in the middle, where it may be part of a transcript the user asked for.
+function trimVolatile(lines) {
+  let start = 0;
+  let end = lines.length;
+  while (start < end && isVolatile(lines[start])) start += 1;
+  while (end > start && isVolatile(lines[end - 1])) end -= 1;
+  return lines.slice(start, end);
 }
