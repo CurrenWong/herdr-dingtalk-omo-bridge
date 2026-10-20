@@ -23,6 +23,12 @@ import { DWClient, TOPIC_ROBOT } from "dingtalk-stream";
 import { saveAttachment } from "./attachments.mjs";
 import { ACTIONS, classifyInbound } from "./inbound.mjs";
 import { assistantMessagesSince, lastAssistantText } from "./session-log.mjs";
+import {
+  RESEND_WINDOW_MS,
+  sendImagesForTurn,
+  wantsPictures,
+  wantsResend,
+} from "./image-out.mjs";
 import { CHOICE_TTL_MS, agentChoices, parseChoice, selectAgent } from "./agent-target.mjs";
 import {
   BRIDGE_URGENT,
@@ -198,6 +204,12 @@ const TEXT = {
       `用户通过钉钉发来一个 ${type} 附件，已保存到本地：\n${path}\n（${size}）\n\n请查看这个文件并回应。如果无法直接读取其中的内容，请说明原因，不要猜测。`,
     attachmentFailed: (err) => `附件下载失败：${err}`,
     truncated: (n) => `…（内容过长，已截断剩余 ${n} 字符）`,
+    resendHint:
+      "（用户要的是已经存在的图。回答里请把每张图的完整相对路径写出来，一行一个、用反引号括起来，不要重画。" +
+      "只写目录不算数——桥找不到文件就不会发。也不要声称已发送：你发不了，发没发由桥决定。）",
+    imageHint:
+      "（如果你在回答里交付图片文件，请写出每张图的完整相对路径，一行一个、用反引号括起来。" +
+      "只写目录不算数——桥找不到文件就不会发。也不要声称已发送：你发不了，发没发由桥决定。）",
     progress: (text) => `⏳ ${text}`,
   },
   en: {
@@ -286,6 +298,14 @@ const TEXT = {
       `The user sent a ${type} attachment through DingTalk. It is saved locally at:\n${path}\n(${size})\n\nPlease look at it and respond. If you cannot actually read its contents, say so rather than guessing.`,
     attachmentFailed: (err) => `Could not download the attachment: ${err}`,
     truncated: (n) => `…(${n} more characters truncated)`,
+    resendHint:
+      "(The user wants pictures that already exist. List each one's full relative path in your answer, one per line, " +
+      "in backticks, and do not redraw them — naming only the directory will not work, because the bridge has nothing " +
+      "to open. Do not claim to have sent anything: you cannot send files, the bridge does.)",
+    imageHint:
+      "(If you hand over a picture file in your answer, write its full relative path, one per line, in backticks — " +
+      "naming only the directory will not work, because the bridge has nothing to open. Do not claim to have sent " +
+      "anything: you cannot send files, the bridge does.)",
     progress: (text) => `⏳ ${text}`,
   },
 };
@@ -1180,6 +1200,17 @@ async function handle(msg) {
     "inbound",
     JSON.stringify({ from: who, conv: convId, msgId, msgtype: verdict.msgtype, text: verdict.text, verdict: verdict.action }),
   );
+  // These two used to be invisible, and both now decide whether a picture can
+  // be sent back at all: `robotCode` is the robot's own code (NOT the appKey —
+  // `/v1.0/robot/groupMessages/send` rejects the appKey with "robot 不存在",
+  // while `/v1.0/robot/emotion/reply` quietly accepts it, which is why the tags
+  // worked and the file did not), and `conversationType` decides group-only
+  // from one-to-one. An outbound failure with neither of these in the log is
+  // not diagnosable.
+  log(
+    "inbound route",
+    JSON.stringify({ conversationType: msg.conversationType, robotCode: msg.robotCode ?? null }),
+  );
   log("inbound keys", JSON.stringify(Object.keys(msg)));
 
   if (verdict.action === ACTIONS.REJECT) {
@@ -1415,6 +1446,27 @@ async function handle(msg) {
     }
   }
 
+  // A picture can only reach the user if the answer names the file, and the
+  // agent has no way to know that — it does not know the bridge exists.
+  // AGENTS.md says so, but a running session may never reread it, so the
+  // requirement also goes into the prompt itself. Same idea as the attachment
+  // prompt above: the bridge knows the protocol, the agent does not.
+  //
+  // Two questions, two answers. `pictures` is "this turn is about getting a
+  // picture delivered" — any delivery request, which also decides whether an
+  // older file may be sent. `resend` is the narrower "again" wording, which
+  // gets its own hint because the agent must not redraw what already exists.
+  const pictures = wantsPictures(verdict.text);
+  const resend = wantsResend(verdict.text);
+  if (resend) promptText = `${promptText}\n\n${t("resendHint")}`;
+  else if (pictures) promptText = `${promptText}\n\n${t("imageHint")}`;
+
+  // The boundary the mtime gate uses: anything written before this moment was
+  // not produced by this turn, however confidently the answer presents it.
+  // Taken as late as possible — the agent cannot have written a picture before
+  // it started working.
+  const turnStartedAt = Date.now();
+
   const answer = await askAgent(paneId, promptText, info?.cwd, async (progress) => {
     // Marked so a running commentary is never mistaken for the result.
     await push(msg.sessionWebhook, t("progress", progress.slice(0, 800)));
@@ -1428,6 +1480,55 @@ async function handle(msg) {
       : answer.text;
     await push(msg.sessionWebhook, body);
   }
+
+  // Pictures the agent just produced ride out with the text. Only a turn that
+  // really answered is mined for paths: a timeout notice or an `/abort` is
+  // ours, not OmO's, and quoting one back as a file would be noise at best.
+  if (answer.ok && answer.text) {
+    // The payload goes in whole: which endpoint answers, and who it is
+    // addressed to, are both read out of it inside `sendImagesForTurn`. Picking
+    // those fields by hand here is how the one-to-one route stayed broken — a
+    // wrong field does not fail here, it fails at the API with "robot 不存在".
+    const images = await sendImagesForTurn({
+      msg,
+      text: answer.text,
+      cwd: info?.cwd,
+      // Asking for a picture is asking for one that may already exist — "把图片
+      // 发给我" names no new work, and in the failing turn the figures were ten
+      // minutes old. The window is what bounds it; the other gates never move.
+      since: pictures ? turnStartedAt - RESEND_WINDOW_MS : turnStartedAt,
+      accessToken,
+      onDecision: (d) => log("image", JSON.stringify(d)),
+    });
+    if (images.wsl.length) log("image wsl paths ignored", JSON.stringify(images.wsl));
+    // The failure that looks most like a broken bridge is the one with nothing
+    // in the log at all: the user asked for the pictures again, OmO answered
+    // "已发送" and named only `figs/outputs/`, so there was no path to act on
+    // and not a single line was written. Now the turn says so out loud.
+    if (pictures && !images.picked.length) {
+      log(
+        "!! pictures asked for but the answer named no file",
+        JSON.stringify({ resend, chars: answer.text.length, head: answer.text.slice(0, 160) }),
+      );
+    }
+    // Logged whenever the answer mentioned a picture at all — including when
+    // every one of them was refused. Logging only the successes made "the mtime
+    // gate turned all of them down" look exactly like "this bridge has no
+    // picture feature", which is what the first real turn looked like: the
+    // answer named two figures and the log said nothing whatsoever.
+    if (images.picked.length || images.skipped.length || images.error) {
+      log(
+        "images",
+        JSON.stringify({
+          picked: images.picked,
+          sent: images.sent.length,
+          skipped: images.skipped,
+          error: images.error,
+        }),
+      );
+    }
+  }
+
   // An interrupted turn is tagged Done: the user stopped it on purpose and the
   // bridge did what it was told, so Error would send someone looking for a
   // failure that does not exist.

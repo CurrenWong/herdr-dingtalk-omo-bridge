@@ -6,6 +6,9 @@
 // looks fast while doing it. That happened once already.
 import { readFileSync } from "node:fs";
 
+/** Block types that mean "the agent has not finished this turn". */
+const ACTING_BLOCK_TYPES = new Set(["toolCall", "tool_call"]);
+
 /**
  * Rows appended after `fromByte`.
  *
@@ -81,7 +84,13 @@ export function assistantMessagesSince(file, fromByte) {
     }
     if (!Array.isArray(content)) continue;
 
-    const stillActing = content.some((c) => typeof c !== "string" && (c?.type ?? "") !== "text");
+    // Only a tool call means the agent is still working. OmO emits exactly three
+    // block types in practice (measured across 20 sessions): text, toolCall and
+    // thinking. Judging "anything that is not text" as acting demotes a finished
+    // "thinking + conclusion" message to narration forever, and a null element in
+    // the array used to do the same thing to the whole message. `image` belongs
+    // to toolResult rows (OmO echoing a picture it read), not to conclusions.
+    const stillActing = content.some((c) => typeof c !== "string" && ACTING_BLOCK_TYPES.has(c?.type));
     const text = content
       // A null element in the array survives the check above; dereferencing it
       // here threw and took the poll down with it.

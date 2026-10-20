@@ -376,6 +376,87 @@ because a `content-length` check only protects against a response that tells the
 truth about its size. Bytes go to a temp name and are renamed into place, so an
 interrupted write cannot leave a truncated file under the real name.
 
+### Pictures the agent produces
+
+The other direction. OmO never emits an image block — measured across 20 real
+sessions, every `image` block belongs to a `toolResult` row (the agent echoing
+a picture it read), never to an assistant conclusion. What the model produces
+is a **path inside its answer text**:
+
+```
+C:\...\figs\outputs\figure_a_dose_response.png 118056 bytes
+```
+
+DingTalk will not render an image from a session webhook at all (its own
+message-type table marks `Image` as API-only), and `sampleImageMsg` wants a
+`photoURL` — a URL anyone can fetch. The bridge runs on the machine where those
+bytes live, so the only route is to upload them and send the result as a file,
+which is what QwenPaw does:
+
+```
+POST https://oapi.dingtalk.com/media/upload?type=image        -> media_id
+POST https://api.dingtalk.com/v1.0/robot/groupMessages/send  msgKey: sampleFile
+```
+
+`fileType: "png"` is not in DingTalk's documented list (xlsx/pdf/zip/rar/doc/docx),
+but `probe-image.mjs` verified the API accepts it: against a dummy conversation
+the only complaint that comes back is about the conversation id, never about the
+msgKey or the msgParam.
+
+**The two send routes are the trap in that call.** DingTalk addresses a group by
+conversation id (`groupMessages/send`) and a one-to-one by the recipient's staff
+id (`oToMessages/batchSend`). They are not interchangeable: posting a one-to-one
+conversation to the group endpoint fails with
+`{"code":"resource.not.found","message":"robot 不存在"}`, for every `msgKey`
+including a plain `sampleText`. That message names the robot rather than the
+mistake, so it reads exactly like a credential problem — and it cost a whole
+debugging round chasing `robotCode`, which turned out to be correct throughout
+(the payload's `robotCode` is the appKey for this bot, and
+`/v1.0/robot/emotion/reply` accepts the appKey without complaint, which is why
+the 👌/🥳 tags kept working while no file was ever sent). The bridge logs both
+values on every inbound (`inbound route`) so the next person does not have to
+rediscover them.
+
+`batchSend` can also answer `200` and quietly drop the message for a recipient it
+could not reach, so an empty `invalidStaffIdList` / `filteredStaffIdList` is
+treated as a failure rather than a success.
+
+**The agent has to name the file.** A path in the answer is the only channel —
+there is nothing else for the bridge to read, and "the figures are in
+`figs/outputs/`" is a directory, not a picture. The agent also has no idea it
+failed: a real answer said "两张图已发送" while naming only the directory, and
+the user reasonably concluded the bridge was broken. `AGENTS.md` in this
+repository tells the agent to list full relative paths and never to claim it has
+sent anything, because it cannot.
+
+Which pictures to send is the real question, because an answer mentions *every*
+path it touched — the ones the user pasted, paths quoted out of a log, and WSL
+paths that do not exist on this host at all. Three gates, in order: the path must
+exist here and end in an image extension, it must have been **written during this
+turn** (mtime >= the moment the prompt went in), and it must not live under
+`state/auth/`, `.git/` or `node_modules/`. At most 3 per turn; everything refused
+is logged with its reason, because silence there is indistinguishable from a bug.
+
+Group chats and one-to-one alike: a group is addressed by its conversation id,
+a one-to-one by `senderStaffId`. Both come out of the same inbound payload, so
+neither address is guessed.
+
+**Asking for a picture is the one exception to the mtime gate**, and it has to
+be: such a turn names pictures that already exist and writes nothing new, so a
+strict gate refuses precisely the files the user just asked for. Measured the
+hard way — a real turn answering "再发一次两张图" named both figures and sent
+neither.
+
+Two separate tests, because they carry different risk:
+
+| | When | What it does |
+|---|---|---|
+| `wantsPictures` | a picture word **and** a delivery verb — 「把图片发给我」「发送图片」「send me the chart」 | opens the window to 24h **and** appends the generic hint to the prompt |
+| `wantsResend` | repeat wording only — 再发 / 重发 / 重新发 / 再传 / 再给我 / 再来一次 / again / resend | same, plus a hint that says *do not redraw* |
+
+Nothing else moves the boundary, and every other gate still applies: the file
+must exist, be an image, sit outside the secrets paths, and fit the per-turn cap.
+
 ### Slash commands
 
 OmO's slash commands are handled by the TUI, not the model, so **nothing is
@@ -653,6 +734,11 @@ If you get it running elsewhere, widening the manifest to
   Whether the agent can *interpret* the contents depends on its model — a
   non-multimodal model will say it cannot read an image, which is the agent's
   answer to give, not the bridge's.
+- **Pictures out are path-driven.** The bridge sends back files the answer
+  *names*, not image blocks — OmO produces no image blocks at all. A picture is
+  only sent if it was written during the turn that mentions it, so a chart saved
+  in an earlier turn stays in the repository. Paths are resolved against the
+  agent's working directory, which is where OmO's relative paths point.
 - **One turn at a time.** A message that arrives mid-turn is queued behind it
   (up to `LAB_QUEUE_LIMIT`, default 3), not run in parallel — the agent is a
   single interactive session, so two prompts at once would interleave.
@@ -779,6 +865,52 @@ terminal attach is not supported on Windows yet"。
 同名附件不会覆盖，会依次变成 `-2`、`-3`（名字来自发件人文件名或消息 id，两个不同的文件
 很容易撞名，而交出去的是同一个路径）。语音、群里的富文本这类既没有文本也没有 `downloadCode` 的消息，才会明确回一句
 「只支持文本消息」——静默跟机器人挂了是分不清的。
+
+**OmO 画出来的图会自己回来。** 反方向是不通的：OmO 从不产生 image block（实测 20 个
+真实会话，image block 全在 `toolResult` 行里，是它把读进来的图回传，不是结论），交付
+图片的唯一形态就是**回答文本里的本地路径**：
+
+```
+C:\...\figs\outputs\figure_a_dose_response.png 118056 bytes
+```
+
+钉钉的 session webhook 发不了图片（它自己的消息类型表就把 Image 标成仅 API），而
+`sampleImageMsg` 要的是一个谁都能拉取的 `photoURL`——图在你自己机器上，只能上传后按文件
+发出去，跟 QwenPaw 走同一条路：`media/upload?type=image` 拿 `media_id`，再以
+`msgKey: sampleFile` 发出。`fileType: "png"` 不在钉钉文档列的清单里（xlsx/pdf/zip/rar/
+doc/docx），但 `probe-image.mjs` 实测钉钉收：用假 conversationId 打过去，回来的抱怨只有
+会话号无效，从头到尾没挑 msgKey 的毛病。
+
+**OmO 必须在回答里写出文件名。** 路径是唯一的渠道——桥没有别的办法知道你要发哪张图，而
+「文件位于 `figs/outputs/`」是个目录，不是图。更要命的是 OmO 不知道自己失败了：真实回答里
+写着「两张图已发送」，却只点名了目录，用户当然合理地认为桥坏了。仓库根的 `AGENTS.md` 因此
+明确要求它列出完整相对路径，并且**不许声称已发送**——它发不了。
+
+**两条发送路线才是这个调用里的坑。** 钉钉对群按会话 id 发（`groupMessages/send`），对单聊
+按收件人的 staff id 发（`oToMessages/batchSend`），两者不能互换：把单聊丢给群聊端点会回
+`{"code":"resource.not.found","message":"robot 不存在"}`，而且**换任何 msgKey 都一样**，连不带
+文件的 `sampleText` 也照报。这句话指着机器人、不指错误，所以读起来完全像凭据问题——为此白查了
+一整轮 `robotCode`，而它从头到尾都是对的（这个机器人的 payload `robotCode` 就是 appKey，而
+`/v1.0/robot/emotion/reply` 又照单全收 appKey，于是 👌/🥳 标签一直好用、图却一张没发出去）。
+现在桥每次入站都把 `conversationType` 和 `robotCode` 一起记进日志（`inbound route`），下一个人
+不用再重新发现一遍。
+
+`batchSend` 还有一种阴招：回 `200` 但把消息悄悄丢掉（`invalidStaffIdList` /
+`filteredStaffIdList` 非空），所以这两个列表非空一律算失败，不算成功。
+
+**发哪几张才是真问题**，因为回答里会提到它碰过的**每一个**路径：你贴进来的、日志里引用的、
+以及根本不在本机的 WSL 路径。所以设了三道门，按顺序：路径必须在本机存在且是图片扩展名；
+必须**在本轮期间写出**（mtime ≥ prompt 发进去的那一刻）；不能在 `state/auth/`、`.git/`、
+`node_modules/` 下面。每轮最多 3 张，被拒的每一个都带原因写进日志——那里一片沉默和坏了
+分不清。群聊按会话 id 发、单聊按 `senderStaffId` 发，两个地址都取自同一份入站 payload，
+所以没有一个是猜的。
+
+**「再发一次」是 mtime 门禁唯一的例外**，而且必须是：重发指的是上一轮的图，这种轮次里
+什么都不会被写出来，严格的边界会精准地拒掉用户刚要的那两个文件。这是被真实轮次教育的——
+一句「再发一次两张图」，OmO 点名了两张图，桥一张没发。所以当**用户自己的消息**里出现
+再发 / 重发 / 重新发 / 再传 / 再给我 / 再来一次 / again / resend 时，边界后退 24 小时
+（`RESEND_WINDOW_MS`）。别的都不动它，其余门禁照旧：文件必须存在、必须是图片、不能在
+secrets 路径下、不超每轮上限。
 
 **过程也会推给你。** 一轮任务可能要装包、试错、绕坑，过去这段时间是完全静默的。
 现在 OmO 边做边说的内容会以 `⏳` 前缀实时推送，最后再把真正的答案发出来。判别靠

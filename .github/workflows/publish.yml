@@ -47,6 +47,7 @@ jobs:
       - name: Gates (same as CI)
         run: |
           npm run check
+          npm run check-messages
           npm run check-paths
           npm run check-manifest
           npm run scan-secrets
@@ -62,7 +63,7 @@ jobs:
           # below would report a missing file instead of the real pack error.
           set -o pipefail
           npm pack --dry-run 2>&1 | tee /tmp/pack.txt
-          for f in npm-shrinkwrap.json herdr-plugin.toml installer.mjs bin/herdr-dingtalk-omo-bridge.mjs; do
+          for f in npm-shrinkwrap.json herdr-plugin.toml installer.mjs bin/herdr-dingtalk-omo-bridge.mjs image-out.mjs; do
             grep -q "$f" /tmp/pack.txt || { echo "::error::$f missing from the tarball"; exit 1; }
           done
 

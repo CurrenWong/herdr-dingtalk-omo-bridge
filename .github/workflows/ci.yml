@@ -36,6 +36,12 @@ jobs:
       - name: Syntax-check every shipped script
         run: npm run check
 
+      # `t()` throws on an unknown key rather than printing undefined, so a
+      # message translated in one language and not the other takes out a whole
+      # turn at runtime. Nothing caught that locally before a user did.
+      - name: Every message exists in every language
+        run: npm run check-messages
+
       - name: Config/state paths are platform-correct
         run: node .github/scripts/check-paths.mjs
 

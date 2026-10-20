@@ -1,6 +1,6 @@
 {
   "name": "herdr-dingtalk-omo-bridge",
-  "version": "0.2.2",
+  "version": "0.3.0",
   "description": "Herdr plugin that bridges DingTalk messages to an OmO coding-agent session, posts the answer back, and tags each message as received/done.",
   "keywords": [
     "herdr",
@@ -24,9 +24,11 @@
     "check-reply.mjs",
     "dingtalk-bridge.mjs",
     "herdr-paths.mjs",
+    "image-out.mjs",
     "inbound.mjs",
     "probe.mjs",
     "probe-emotion.mjs",
+    "probe-image.mjs",
     "process-state.mjs",
     "session-log.mjs",
     "slash.mjs",
@@ -52,11 +54,13 @@
   },
   "scripts": {
     "check": "node .github/scripts/check-syntax.mjs",
+    "check-messages": "node .github/scripts/check-messages.mjs",
     "check-paths": "node .github/scripts/check-paths.mjs",
     "check-manifest": "node .github/scripts/check-manifest.mjs",
     "scan-secrets": "node .github/scripts/scan-secrets.mjs .",
     "check-reply": "node check-reply.mjs",
-    "probe-emotion": "node probe-emotion.mjs"
+    "probe-emotion": "node probe-emotion.mjs",
+    "probe-image": "node probe-image.mjs"
   },
   "dependencies": {
     "dingtalk-stream": "^2.1.6-beta.1"

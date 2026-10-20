@@ -21,6 +21,10 @@ state/
 # which is usually this repo. They are somebody's files, not source.
 .dingtalk-inbox/
 
+# Figures OmO generates while working in this repo (figs/outputs/*.png).
+# Generated output, like the inbox above — never source, never committed.
+figs/
+
 # Editor / OS noise
 .DS_Store
 Thumbs.db
